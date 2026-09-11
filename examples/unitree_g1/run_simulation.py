@@ -18,7 +18,9 @@ def main():
     parser.add_argument("--assets", type=Path, required=True)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--steps", type=int, default=600)
-    parser.add_argument("--viewer-frames", type=int, default=0, help="Close after N frames; 0 runs continuously")
+    parser.add_argument(
+        "--viewer-frames", type=int, default=0, help="Close after N frames; 0 runs continuously"
+    )
     parser.add_argument("--no-gravity-compensation", action="store_true")
     args = parser.parse_args()
     if args.steps <= 0:
