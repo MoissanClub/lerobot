@@ -92,13 +92,27 @@ class UnitreeG1Config(RobotConfig):
     controller: str | None = None
 
     embodiment: str = "g1_29"
+    # Explicit opt-in: local supported-arm physics, no DDS/SDK or asset download.
+    simulation_urdf: str | None = None
+    simulation_mesh_dir: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
         spec = get_g1_embodiment(self.embodiment)
+        if self.simulation_urdf is not None:
+            if not self.simulation_urdf or not self.is_simulation or self.controller or self.cameras:
+                raise ValueError(
+                    "Native simulation requires a URDF, simulation mode, and no external controller/cameras"
+                )
+            if not isfinite(self.control_dt) or self.control_dt <= 0 or self.control_dt > 0.1:
+                raise ValueError("Native control_dt must be in (0, 0.1]")
         if self.controller is not None and not spec.supports_controller:
             raise ValueError(f"Controllers are not supported for {self.embodiment}")
-        if self.gravity_compensation and not spec.supports_gravity_compensation:
+        if (
+            self.gravity_compensation
+            and not spec.supports_gravity_compensation
+            and self.simulation_urdf is None
+        ):
             raise ValueError(f"Gravity compensation is not implemented for {self.embodiment}")
         default_kp, default_kd = (_DEFAULT_KP, _DEFAULT_KD) if self.embodiment == "g1_29" else _g1_23_gains()
         self.kp = list(default_kp if self.kp is None else self.kp)
