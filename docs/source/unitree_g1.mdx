@@ -28,7 +28,7 @@ config = UnitreeG1Config(embodiment="g1_23")
 | Sparse command/feedback mapping | Existing layout | Implemented and tested with mocked transport |
 | Simulation connection | Existing Hub environment | Not implemented; rejected before transport initialization |
 | Physical connection | Existing interface, separate hardware requirements | Not supported; rejected before transport initialization |
-| Gravity compensation | Existing solver, off by default | Rejected until the G1-23 kinematics implementation is added |
+| Gravity compensation in the robot driver | Existing solver, off by default | Rejected until the shared solver is integrated into the runtime |
 | Locomotion/whole-body controllers | Existing G1-29 controllers | Rejected; no implicit G1-29 controller reuse |
 
 **Joint counts are not transport widths.** Both configurations use 29-element `kp`, `kd`,
@@ -47,13 +47,14 @@ with active-joint selection checked against the
 G1-29 retains LeRobot's original gains, not these derived gains.
 
 `g1_embodiments.py` records URDF repository/path metadata for each embodiment. This is
-source identification, not an asset downloader, a physical hardware identity check, or
-an implemented G1-23 solver. G1-29 keeps its existing Hub runtime unchanged. Future
-kinematics/simulation integration must select compatible, pinned model revisions;
+source identification, not an asset downloader or a physical hardware identity check.
+The separate Cartesian API below loads explicit model paths. G1-29 keeps its existing
+Hub runtime unchanged. Runtime integration must select compatible, pinned model revisions;
 joint count alone does not identify a hardware/model revision.
 
-Shared IK/FK, a G1-23 simulator, XR/video, and optional hand composition are separate
-extensions. This layer deliberately cannot connect a G1-23 configuration to the existing
+Shared IK/FK is available through the standalone Cartesian API below. A G1-23
+simulator, XR/video, and optional hand composition remain separate extensions.
+This layer deliberately cannot connect a G1-23 configuration to the existing
 G1-29 simulator. No physical robot was used for the embodiment regression tests.
 
 ### Embodiment Regression Tests
@@ -70,6 +71,22 @@ PYTHONPATH=src python -m pytest \
 
 The SDK, cameras, and environment are mocked in driver tests; no simulator, asset
 download, or hardware connection is required. The runtime instructions below apply to G1-29.
+
+### Shared Cartesian Control
+
+`lerobot.robots.unitree_g1.g1_cartesian_control` provides `G1CartesianConfig`,
+`G1ArmKinematics`, and `G1IKResult` for fixed-base dual-arm FK, IK, and static
+gravity feedforward for either embodiment. It takes an explicit URDF path, uses
+compact arm vectors in DDS order, and has no XR, simulator, or transport connection.
+The legacy `G1_29_ArmIK` runtime path and its defaults remain unchanged. Enabling
+the new G1-23 solver in a live driver is deferred to runtime integration; the
+configuration guards in the capability table still apply to `UnitreeG1`.
+
+See `examples/unitree_g1/README.md` in the repository for pinned model preparation,
+the cumulative pytest command, a headless numerical/rendering check, and the
+side-by-side native-URDF Tk viewer. The viewer is kinematic playback, not a motor
+simulation. Every command reports bounded best-effort versus converged behavior;
+G1-23 cannot match arbitrary six-dimensional hand poses with five joints per arm.
 
 ---
 
