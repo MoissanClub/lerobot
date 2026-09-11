@@ -15,29 +15,33 @@ import struct
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 HEADER_BYTES = 4096
 VERSION = 1
 MAX_DIMENSION = 4096
 
 
-def validate_dimensions(width, height):
+def validate_dimensions(width: int, height: int) -> None:
     if any(type(x) is not int or not 1 <= x <= MAX_DIMENSION for x in (width, height)):
         raise ValueError("Camera dimensions must be integers in [1, 4096]")
 
 
-def default_channel():
+def default_channel() -> Path:
     return Path(f"/tmp/lerobot-camera-{os.getuid()}.rgb")
 
 
 class FrameWriter:
-    def __init__(self, path, width, height):
+    def __init__(self, path: str | Path, width: int, height: int) -> None:
         validate_dimensions(width, height)
         self.path = Path(path)
         self.width, self.height = width, height
-        self.owner = self.fd = self.mapping = None
+        self.owner: int | None = None
+        self.fd: int | None = None
+        self.mapping: mmap.mmap | None = None
         self.session_id = uuid.uuid4().hex
         self.sequence = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -56,8 +60,8 @@ class FrameWriter:
             temporary.unlink(missing_ok=True)
             raise
 
-    def publish(self, pixels, metadata):
-        if self.mapping is None:
+    def publish(self, pixels: NDArray[np.uint8], metadata: dict[str, Any]) -> bool:
+        if self.mapping is None or self.fd is None:
             raise RuntimeError("Camera writer is closed")
         if pixels.shape != (self.height, self.width, 3) or pixels.dtype != np.uint8:
             raise ValueError("Expected HxWx3 uint8 RGB pixels")
@@ -90,7 +94,7 @@ class FrameWriter:
             fcntl.flock(self.fd, fcntl.LOCK_UN)
         return True
 
-    def close(self, unlink=True):
+    def close(self, unlink: bool = True) -> None:
         if self.mapping is not None:
             self.mapping.close()
             self.mapping = None
@@ -108,7 +112,7 @@ class FrameWriter:
             self.owner = None
 
 
-def read_frame(path, max_age_s=1.0):
+def read_frame(path: str | Path, max_age_s: float = 1.0) -> tuple[dict[str, Any], NDArray[np.uint8]] | None:
     """Return owned (metadata, RGB pixels), or None if missing, busy, or stale."""
     if not np.isfinite(max_age_s) or max_age_s <= 0:
         raise ValueError("max_age_s must be positive finite")
