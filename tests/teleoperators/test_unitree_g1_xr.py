@@ -154,3 +154,40 @@ def test_connect_failure_cleanup(tmp_path):
 def test_invalid_transform():
     with pytest.raises(ValueError):
         XRControllersConfig(base_T_anchor=np.zeros((4, 4)).tolist())
+
+
+def test_sdk_partial_startup_drains_entered_contexts(monkeypatch):
+    import sys
+    from contextlib import ExitStack
+
+    from lerobot.teleoperators.xr_controllers.xr_controllers import IsaacControllerSession
+
+    closed = []
+    stack = ExitStack()
+    stack.callback(lambda: closed.append(True))
+
+    class PartialSession:
+        _exit_stack = stack
+
+        def __enter__(self):
+            raise ValueError("DeviceIO failed after OpenXR opened")
+
+        def __exit__(self, *args):
+            raise AssertionError("Incomplete SDK session must drain its entry stack")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaacteleop.teleop_session_manager",
+        SimpleNamespace(
+            TeleopSession=lambda _: PartialSession(), TeleopSessionConfig=lambda **kwargs: kwargs
+        ),
+    )
+    backend = IsaacControllerSession.__new__(IsaacControllerSession)
+    backend.config = SimpleNamespace(app_name="test")
+    backend.pipeline = None
+    backend.oxr_handles = None
+    backend.entered = False
+    with pytest.raises(ValueError, match="DeviceIO failed"):
+        backend.connect()
+    backend.close()
+    assert closed == [True] and backend.session is None and not backend.entered

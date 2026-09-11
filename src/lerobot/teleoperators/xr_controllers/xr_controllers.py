@@ -74,7 +74,22 @@ class IsaacControllerSession:
                 app_name=self.config.app_name, pipeline=self.pipeline, oxr_handles=self.oxr_handles
             )
         )
-        self.session.__enter__()
+        try:
+            self.session.__enter__()
+        except BaseException as exc:
+            # Isaac Teleop's __exit__ returns early before _setup_complete. Drain
+            # its entered contexts when DeviceIO/plugin setup fails after OpenXR.
+            # Keep this SDK-specific workaround here, not in the generic device.
+            stack = getattr(self.session, "_exit_stack", None)
+            try:
+                if stack is not None:
+                    stack.close()
+                else:
+                    self.session.__exit__(type(exc), exc, exc.__traceback__)
+            except Exception as cleanup:
+                exc.add_note(f"XR startup cleanup also failed: {cleanup}")
+            self.session = None
+            raise
         self.entered = True
 
     def read(self):
@@ -118,7 +133,8 @@ class IsaacControllerSession:
     def close(self):
         if self.entered:
             self.entered = False
-            self.session.__exit__(None, None, None)
+            session, self.session = self.session, None
+            session.__exit__(None, None, None)
 
 
 class XRControllers(Teleoperator):

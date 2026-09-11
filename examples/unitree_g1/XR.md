@@ -26,6 +26,12 @@ malformed data, worker deadline misses, and stale/out-of-order samples disengage
 re-engagement rebases from measured FK. Call `control.reset()` when reconnecting
 the input source. This is not a physical emergency stop or collision avoidance.
 
+The installed Isaac Teleop session's public exit method skips teardown when
+initialization is incomplete. The adapter drains its private entry ExitStack on
+startup failure, so contexts already opened before DeviceIO/plugin failure close.
+This SDK-specific workaround has a regression test and must be revisited when
+updating the SDK; native failures inside a context's own entry remain vendor-owned.
+
 The SDK interface follows the existing NVIDIA Isaac Teleop example in this
 repository; installation instructions remain in `examples/isaac_teleop_to_so101`.
 The unit suite needs no SDK/headset. The combined simulation test needs the
