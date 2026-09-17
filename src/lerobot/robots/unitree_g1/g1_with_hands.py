@@ -1,6 +1,6 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # Licensed under the Apache License, Version 2.0. See LICENSE in the project root.
-"""Optional hand composition, preserving the body robot's action namespace."""
+"""Compatibility wrapper; new G1 integrations should use UnitreeG1Config.hands."""
 
 from dataclasses import dataclass, field
 
@@ -30,6 +30,10 @@ class G1WithHands(Robot):
     name = "unitree_g1_with_hands"
 
     def __init__(self, config, *, body_factory=UnitreeG1, hand_factory=make_hand):
+        if body_factory is UnitreeG1 and config.hands and config.body.is_simulation:
+            raise ValueError("Configured physical hand drivers cannot be used in simulation")
+        if config.body.hands:
+            raise ValueError("Configure hands on the body or compatibility wrapper, not both")
         self._connected = False
         super().__init__(config)
         self.config = config

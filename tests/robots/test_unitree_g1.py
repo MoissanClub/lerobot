@@ -172,7 +172,7 @@ def make_robot():
 
         def _factory(controller=None, cameras=None, **config_kwargs):
             cfg = UnitreeG1Config(
-                is_simulation=True,
+                is_simulation=config_kwargs.pop("is_simulation", True),
                 gravity_compensation=False,
                 cameras=cameras or {},
                 **config_kwargs,
@@ -713,6 +713,47 @@ class TestControllerInput:
 
         assert robot.controller_input["remote.lx"] == 0.25
         assert robot.controller_input["remote.ly"] == -0.5
+
+
+@pytest.mark.parametrize("embodiment", ["g1_29", "g1_23"])
+def test_optional_hands_use_normal_robot_interface(make_robot, embodiment):
+    from lerobot.robots.unitree_g1.hand_system import HandConfig
+    from tests.robots.test_unitree_g1_hands import Device
+
+    factory, mocks = make_robot
+    with patch("lerobot.robots.unitree_g1.hand_collection.make_hand", side_effect=Device):
+        robot = arm_for_publish(
+            factory(embodiment=embodiment, is_simulation=False, hands={"left": HandConfig(side="left")}),
+            mocks,
+        )
+    robot._connect_body = MagicMock()
+    robot._disconnect_body = MagicMock()
+    robot._lowstate = mocks["lowstate_msg"]
+    robot.connect()
+    assert robot.name == "unitree_g1"
+    assert "hands.left.q" in robot.action_features
+    assert "hands.left.q" in robot.observation_features
+    action = {"kRightShoulderPitch.q": 0.2, "hands.left.q": 0.7}
+    assert robot.send_action(action) == action
+    assert robot.get_observation()["hands.left.q"] == 0.7
+    before = mocks["publisher_mock"].Write.call_count
+    with pytest.raises(ValueError):
+        robot.send_action({**action, "hands.left.q": float("nan")})
+    assert mocks["publisher_mock"].Write.call_count == before
+    robot.hands.devices["left"].fail = "read"
+    with pytest.raises(RuntimeError, match="read"):
+        robot.get_observation()
+    assert not robot.hands.is_connected
+    robot._disconnect_body.assert_called_once()
+
+
+def test_hands_configuration_rejects_simulation_and_wrong_side():
+    from lerobot.robots.unitree_g1.hand_system import HandConfig
+
+    with pytest.raises(ValueError, match="simulation"):
+        UnitreeG1Config(hands={"left": HandConfig(side="left")})
+    with pytest.raises(ValueError, match="side"):
+        UnitreeG1Config(is_simulation=False, hands={"left": HandConfig(side="right")})
 
 
 class TestEmbodimentDriver:
