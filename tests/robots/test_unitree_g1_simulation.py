@@ -40,6 +40,8 @@ def test_native_does_not_require_sdk_or_download_legacy_ik(monkeypatch):
     with pytest.raises(RuntimeError, match="Not connected"):
         robot.send_action({})
     robot.disconnect()
+
+
 def test_native_simulation_end_effector_is_explicit():
     from lerobot.envs.configs import G1EndEffector
     from lerobot.robots.unitree_g1.config_unitree_g1 import UnitreeG1Config
