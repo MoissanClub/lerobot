@@ -10,6 +10,7 @@ import asyncio
 import inspect
 import time
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import numpy as np
 
@@ -22,6 +23,7 @@ FINGERS = ("thumb", "index", "middle", "ring", "pinky")
 @HandConfig.register_subclass("brainco_revo2")
 @dataclass(kw_only=True)
 class BrainCoHandConfig(HandConfig):
+    end_effector: ClassVar[str] = "brainco"
     port: str
     device_id: int | None = None
     allow_hardware: bool = False

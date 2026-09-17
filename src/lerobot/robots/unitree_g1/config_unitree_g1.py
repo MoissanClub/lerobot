@@ -84,7 +84,7 @@ class UnitreeG1Config(RobotConfig):
     end_effector: G1EndEffector = G1EndEffector.DEX1
 
     # Loads the lerobot/unitree-g1-mujoco environment
-    sim_env: UnitreeG1MujocoEnv = field(init=False)
+    sim_env: UnitreeG1MujocoEnv | None = field(init=False)
 
     # Where the sim's cameras are published, or its viewer instead when publishing is off.
     sim_publish_images: bool = True
@@ -134,6 +134,16 @@ class UnitreeG1Config(RobotConfig):
             if any(values[index] != 0 for index in inactive):
                 raise ValueError(f"{name} must be zero at inactive {self.embodiment} DDS slots")
         self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
+        brainco = [getattr(hand, "end_effector", None) == "brainco" for hand in self.hands.values()]
+        if any(brainco) and (not all(brainco) or self.end_effector != G1EndEffector.BRAINCO):
+            raise ValueError("BrainCo drivers require end_effector='brainco' and matching hand types")
+        if self.end_effector == G1EndEffector.BRAINCO:
+            if self.is_simulation:
+                raise ValueError("BrainCo simulation is not implemented")
+            if not brainco or not all(brainco):
+                raise ValueError("BrainCo end effector requires explicit BrainCo hand configurations")
+            self.sim_env = None
+            return
         self.sim_env = UnitreeG1MujocoEnv(
             publish_images=self.sim_publish_images,
             camera_port=self.sim_camera_port,

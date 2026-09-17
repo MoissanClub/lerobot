@@ -229,3 +229,16 @@ def test_installed_sdk_contract():
     for name in ("positions", "speeds", "currents", "states"):
         assert hasattr(sdk.MotorStatusData, name)
     assert hasattr(sdk.DeviceInfo, "hand_type") and hasattr(sdk.DeviceInfo, "get_hardware_type")
+def test_brainco_uses_robot_end_effector_configuration():
+    from lerobot.envs.configs import UnitreeG1MujocoEnv
+    from lerobot.robots.unitree_g1.config_unitree_g1 import UnitreeG1Config
+
+    hands = {"left": BrainCoHandConfig(side="left", port="/dev/unused")}
+    config = UnitreeG1Config(is_simulation=False, end_effector="brainco", hands=hands)
+    assert config.hands == hands and config.sim_env is None
+    with pytest.raises(ValueError, match="BrainCo"):
+        UnitreeG1Config(is_simulation=False, hands=hands)
+    with pytest.raises(ValueError, match="BrainCo"):
+        UnitreeG1Config(is_simulation=False, end_effector="brainco")
+    with pytest.raises(ValueError, match="simulation"):
+        UnitreeG1MujocoEnv(end_effector="brainco")
