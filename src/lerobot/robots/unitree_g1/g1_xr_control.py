@@ -6,7 +6,10 @@ import time
 
 import numpy as np
 
+from lerobot.processor import TransitionKey
 from lerobot.teleoperators.xr_controllers.xr_controllers import controller_pose
+
+from .g1_action_processor import G1CartesianActionProcessor
 
 
 class G1XRControl:
@@ -16,6 +19,10 @@ class G1XRControl:
         if not all(np.isfinite(x) and x > 0 for x in (max_age, translation_scale)):
             raise ValueError("max_age and translation_scale must be positive finite")
         self.ik = kinematics
+        self.processor = G1CartesianActionProcessor(
+            embodiment=getattr(getattr(kinematics, "embodiment", None), "name", "g1_29")
+        )
+        self.processor._kinematics = kinematics
         self.threshold, self.max_age, self.scale = threshold, max_age, translation_scale
         self.reset()
 
@@ -59,7 +66,15 @@ class G1XRControl:
             self.targets[i][:3, :3] = pose[:3, :3] @ origin[:3, :3].T @ robot_origin[:3, :3]
         if not any(self.engaged):
             return self.ik.arm_action(measured)
-        result = self.ik.solve(*self.targets, seed=measured)
+        # The processor is also usable outside XR (recording, policy or replay).
+        observation = self.ik.arm_action(measured)
+        self.processor(
+            {
+                TransitionKey.ACTION: {"left.ee_pose": self.targets[0], "right.ee_pose": self.targets[1]},
+                TransitionKey.OBSERVATION: observation,
+            }
+        )
+        result = self.processor.last_result
         self.last_result = result
         q = result.q.copy()
         half = self.ik.size // 2

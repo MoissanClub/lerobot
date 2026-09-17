@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from lerobot.robots.unitree_g1.g1_embodiments import get_g1_embodiment
 from lerobot.robots.unitree_g1.g1_xr_control import G1XRControl
 from lerobot.teleoperators.xr_controllers import XRControllers, XRControllersConfig
 from lerobot.teleoperators.xr_controllers.xr_controllers import controller_pose
@@ -26,19 +27,22 @@ def sample(stamp=10.0, left=1.0, right=1.0):
 
 
 class Kinematics:
-    size = 6
+    size = 14
+    embodiment = get_g1_embodiment("g1_29")
 
     def fk(self, q):
         result = [np.eye(4), np.eye(4)]
         for i in range(2):
-            result[i][:3, 3] = q[3 * i : 3 * i + 3]
+            result[i][:3, 3] = q[7 * i : 7 * i + 3]
         return result
 
     def solve(self, left, right, seed):
-        return SimpleNamespace(q=np.r_[left[:3, 3], right[:3, 3]])
+        q = seed.copy()
+        q[:3], q[7:10] = left[:3, 3], right[:3, 3]
+        return SimpleNamespace(q=q)
 
     def arm_action(self, q):
-        return {str(i): v for i, v in enumerate(q)}
+        return {f"{joint.name}.q": v for joint, v in zip(self.embodiment.arm_index, q, strict=True)}
 
 
 @pytest.mark.parametrize("side", ["left", "right"])
@@ -57,21 +61,21 @@ class Kinematics:
 def test_invalid_pose_releases(side, field, value):
     control = G1XRControl(Kinematics())
     action = sample()
-    control.action(action, np.zeros(6), now=10)
+    control.action(action, np.zeros(14), now=10)
     action[f"{side}.{field}"] = value
     assert controller_pose(action, side) is None
-    control.action(action, np.zeros(6), now=10)
+    control.action(action, np.zeros(14), now=10)
     assert not control.engaged[("left", "right").index(side)]
 
 
 def test_independent_motion_release_reengage_and_staleness():
     control = G1XRControl(Kinematics())
-    q = np.zeros(6)
+    q = np.zeros(14)
     action = sample(right=0)
     control.action(action, q, now=10)
     action["left.grip_pos"] = np.array([0.1, 0.2, 0.3])
     result = control.action(action, q, now=10)
-    np.testing.assert_allclose(list(result.values()), [0.1, 0.2, 0.3, 0, 0, 0])
+    np.testing.assert_allclose(list(result.values()), [0.1, 0.2, 0.3] + [0] * 11)
     control.action(action, q, now=11)
     assert control.engaged == (False, False)
     q[:3] = [0.01, 0.02, 0.03]
@@ -82,20 +86,20 @@ def test_independent_motion_release_reengage_and_staleness():
 @pytest.mark.parametrize("stamp", [float("nan"), float("inf"), 20.0, 1.0, None])
 def test_bad_timestamp_holds(stamp):
     control = G1XRControl(Kinematics())
-    assert list(control.action(sample(stamp), np.zeros(6), now=10).values()) == [0] * 6
+    assert list(control.action(sample(stamp), np.zeros(14), now=10).values()) == [0] * 14
     assert not any(control.engaged)
 
 
 def test_rotation_and_timestamp_regression():
     control = G1XRControl(Kinematics())
     action = sample()
-    control.action(action, np.zeros(6), now=10)
+    control.action(action, np.zeros(14), now=10)
     action["left.grip_quat"] = [0, 0, np.sin(0.2), np.cos(0.2)]
-    control.action(action, np.zeros(6), now=10)
+    control.action(action, np.zeros(14), now=10)
     assert not np.allclose(control.targets[0][:3, :3], np.eye(3))
     np.testing.assert_allclose(control.targets[1][:3, :3], np.eye(3))
     action["captured_at"] = 9.99
-    control.action(action, np.zeros(6), now=10)
+    control.action(action, np.zeros(14), now=10)
     assert not any(control.engaged)
 
 
