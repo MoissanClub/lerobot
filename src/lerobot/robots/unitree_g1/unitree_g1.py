@@ -34,12 +34,12 @@ from ..robot import Robot
 from .config_unitree_g1 import UnitreeG1Config
 from .g1_embodiments import get_g1_embodiment
 from .g1_kinematics import G1_29_ArmIK
-from .hand_collection import HandCollection
 from .g1_utils import (
     NUM_MOTORS,
     REMOTE_AXES,
     default_remote_input,
 )
+from .hand_collection import HandCollection
 
 if TYPE_CHECKING or _unitree_sdk_available:
     from unitree_sdk2py.core.channel import (
