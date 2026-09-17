@@ -12,13 +12,18 @@ client method. SDK version is checked before opening any port.
 
 ```python
 from lerobot.robots.unitree_g1.brainco_hand import BrainCoHandConfig
-from lerobot.robots.unitree_g1.g1_with_hands import G1WithHandsConfig
+from lerobot.robots.unitree_g1.config_unitree_g1 import UnitreeG1Config
 
-config = G1WithHandsConfig(hands={
+config = UnitreeG1Config(is_simulation=False, end_effector="brainco", hands={
     "left": BrainCoHandConfig(side="left", port="/dev/serial/by-id/LEFT"),
     "right": BrainCoHandConfig(side="right", port="/dev/serial/by-id/RIGHT"),
 })
 ```
+
+The robot remains `unitree_g1`; no separate hand-equipped robot identity is
+needed. Hand drivers must agree with the robot's `end_effector` selection.
+BrainCo simulation is explicitly rejected: a mocked SDK is not an articulated
+MuJoCo hand model. The physical G1-23 connection remains gated independently.
 
 Hardware is **disabled by default**. Physical preflight and explicit
 `allow_hardware=True` are required. No device scanning, automatic homing, grasp,
