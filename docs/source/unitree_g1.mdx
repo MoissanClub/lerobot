@@ -7,8 +7,8 @@
 />
 
 The Unitree G1 humanoid is supported in LeRobot. G1-29 retains the existing runtime,
-simulation, and controller interfaces. G1-23 currently has embodiment configuration
-and joint-mapping support; its runtime integration is not enabled by this layer.
+simulation, and controller interfaces. Both embodiments also support an opt-in,
+in-process fixed-base MuJoCo arm simulator using an explicit URDF.
 
 ## Embodiment Selection
 
@@ -26,9 +26,9 @@ config = UnitreeG1Config(embodiment="g1_23")
 |---|---|---|
 | Joint configuration and action/observation features | 29 body joints, 14 arm joints | 23 body joints, 10 arm joints |
 | Sparse command/feedback mapping | Existing layout | Implemented and tested with mocked transport |
-| Simulation connection | Existing Hub environment | Not implemented; rejected before transport initialization |
+| Simulation connection | Existing Hub environment or explicit native URDF | Explicit native URDF; no implicit Hub fallback |
 | Physical connection | Existing interface, separate hardware requirements | Not supported; rejected before transport initialization |
-| Gravity compensation in the robot driver | Existing solver, off by default | Rejected until the shared solver is integrated into the runtime |
+| Gravity compensation in the robot driver | Existing solver, or shared solver in native simulation | Shared solver in native simulation only |
 | Locomotion/whole-body controllers | Existing G1-29 controllers | Rejected; no implicit G1-29 controller reuse |
 
 **Joint counts are not transport widths.** Both configurations use 29-element `kp`, `kd`,
@@ -52,8 +52,8 @@ The separate Cartesian API below loads explicit model paths. G1-29 keeps its exi
 Hub runtime unchanged. Runtime integration must select compatible, pinned model revisions;
 joint count alone does not identify a hardware/model revision.
 
-Shared IK/FK is available through the standalone Cartesian API below. A G1-23
-simulator, XR/video, and optional hand composition remain separate extensions.
+Shared IK/FK is available through the standalone Cartesian API below. XR/video
+and optional hand composition remain separate extensions.
 This layer deliberately cannot connect a G1-23 configuration to the existing
 G1-29 simulator. No physical robot was used for the embodiment regression tests.
 
@@ -78,9 +78,21 @@ download, or hardware connection is required. The runtime instructions below app
 `G1ArmKinematics`, and `G1IKResult` for fixed-base dual-arm FK, IK, and static
 gravity feedforward for either embodiment. It takes an explicit URDF path, uses
 compact arm vectors in DDS order, and has no XR, simulator, or transport connection.
-The legacy `G1_29_ArmIK` runtime path and its defaults remain unchanged. Enabling
-the new G1-23 solver in a live driver is deferred to runtime integration; the
-configuration guards in the capability table still apply to `UnitreeG1`.
+The legacy `G1_29_ArmIK` runtime path and its defaults remain unchanged. Native
+simulation selects this shared solver; physical G1-23 remains unsupported.
+
+### Native Arm Simulation
+
+Set `simulation_urdf` and optionally `simulation_mesh_dir` on `UnitreeG1Config`.
+`connect`, `send_action`, `get_observation`, and `disconnect` then use an in-process
+MuJoCo backend without DDS or hardware discovery. Each action advances one control
+period; `step_simulation` advances while holding targets. `render_simulation`
+returns an RGB image from a body-mounted camera or spectator view.
+
+See `examples/unitree_g1/SIMULATION.md` for setup, headless and keyboard examples,
+and gravity-compensation tests. Legs, waist and fingers are fixed; collisions are
+disabled. This is an arm-control regression model, not a calibrated whole-body
+simulator or a replacement for the experimental multiprocess DDS workflow.
 
 See `examples/unitree_g1/README.md` in the repository for pinned model preparation,
 the cumulative pytest command, a headless numerical/rendering check, and the
