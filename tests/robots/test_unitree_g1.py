@@ -762,9 +762,7 @@ def test_body_homing_does_not_read_disconnected_hands(make_robot):
 
     factory, mocks = make_robot
     with patch("lerobot.robots.unitree_g1.hand_collection.make_hand", side_effect=Device):
-        robot = arm_for_publish(
-            factory(is_simulation=False, hands={"left": HandConfig(side="left")}), mocks
-        )
+        robot = arm_for_publish(factory(is_simulation=False, hands={"left": HandConfig(side="left")}), mocks)
     robot._lowstate = mocks["lowstate_msg"]
     robot.hands.devices["left"].fail = "read"
     with patch("lerobot.robots.unitree_g1.unitree_g1.time.sleep"):
