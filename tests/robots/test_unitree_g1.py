@@ -671,6 +671,14 @@ class TestDisconnect:
 # ---------------------------------------------------------------------------
 
 
+def test_position_command_clears_sdk_velocity(make_robot):
+    factory, mocks = make_robot
+    robot = arm_for_publish(factory(), mocks)
+    robot.msg.motor_cmd[22].dq = 4.0
+    robot.publish_lowcmd({"kRightShoulderPitch.q": 0.2})
+    assert robot.msg.motor_cmd[22].dq == 0.0
+
+
 class TestControllerInput:
     def test_starts_from_a_zeroed_remote(self, make_robot):
         factory, _ = make_robot
@@ -718,7 +726,8 @@ class TestEmbodimentDriver:
                 robot.connect()
                 assert robot.is_connected
                 assert robot.sim_env is env
-                make_env.assert_called_once_with("lerobot/unitree-g1-mujoco", trust_remote_code=True)
+                make_env.assert_called_once_with(robot.config.sim_env, trust_remote_code=True)
+                assert robot.config.sim_env.end_effector == robot.config.end_effector
                 robot._ChannelFactoryInitialize.assert_called_once_with(0, "lo")
                 for joint in robot.joint_index:
                     command = robot.msg.motor_cmd[joint.value]

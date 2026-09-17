@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from math import isfinite
 
 from lerobot.cameras import CameraConfig
+from lerobot.envs.configs import G1EndEffector, UnitreeG1MujocoEnv
 
 from ..config import RobotConfig
 from .g1_embodiments import get_g1_embodiment
@@ -78,6 +79,19 @@ class UnitreeG1Config(RobotConfig):
     # Launch mujoco simulation
     is_simulation: bool = True
 
+    # Supports dummy, dex1, dex3
+    end_effector: G1EndEffector = G1EndEffector.DEX1
+
+    # Loads the lerobot/unitree-g1-mujoco environment
+    sim_env: UnitreeG1MujocoEnv = field(init=False)
+
+    # Where the sim's cameras are published, or its viewer instead when publishing is off.
+    sim_publish_images: bool = True
+    sim_camera_port: int = 5555
+
+    # Toggle the viewer on or off
+    sim_onscreen: bool | None = None
+
     # Socket config for ZMQ bridge
     robot_ip: str = "192.168.123.164"  # default G1 IP
 
@@ -112,3 +126,10 @@ class UnitreeG1Config(RobotConfig):
                 raise ValueError(f"{name} must be nonnegative")
             if any(values[index] != 0 for index in inactive):
                 raise ValueError(f"{name} must be zero at inactive {self.embodiment} DDS slots")
+        self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
+        self.sim_env = UnitreeG1MujocoEnv(
+            publish_images=self.sim_publish_images,
+            camera_port=self.sim_camera_port,
+            onscreen=self.sim_onscreen,
+            end_effector=self.end_effector,
+        )
