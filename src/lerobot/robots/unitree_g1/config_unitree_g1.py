@@ -80,7 +80,7 @@ class UnitreeG1Config(RobotConfig):
     is_simulation: bool = True
 
     # Supports dummy, dex1, dex3
-    end_effector: G1EndEffector = G1EndEffector.DEX1
+    end_effector: G1EndEffector | None = None
 
     # Loads the lerobot/unitree-g1-mujoco environment
     sim_env: UnitreeG1MujocoEnv = field(init=False)
@@ -140,7 +140,11 @@ class UnitreeG1Config(RobotConfig):
                 raise ValueError(f"{name} must be nonnegative")
             if any(values[index] != 0 for index in inactive):
                 raise ValueError(f"{name} must be zero at inactive {self.embodiment} DDS slots")
-        self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
+        if self.end_effector is None:
+            self.end_effector = G1EndEffector.DUMMY if self.simulation_urdf else G1EndEffector.DEX1
+        self.end_effector = G1EndEffector(self.end_effector)
+        if self.simulation_urdf and self.end_effector != G1EndEffector.DUMMY:
+            raise ValueError("Native diagnostic simulation supports only dummy end effectors")
         self.sim_env = UnitreeG1MujocoEnv(
             publish_images=self.sim_publish_images,
             camera_port=self.sim_camera_port,
