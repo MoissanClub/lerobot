@@ -764,7 +764,8 @@ class UnitreeG1(Robot):
                 num_steps = int(total_time / control_dt)
 
                 # get current state
-                obs = self.get_observation()
+                # Body homing may precede hand connection during controller startup.
+                obs = self._get_body_observation()
 
                 # record current positions
                 init_dof_pos = np.zeros(NUM_MOTORS, dtype=np.float32)

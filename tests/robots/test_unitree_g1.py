@@ -756,6 +756,23 @@ def test_hands_configuration_rejects_simulation_and_wrong_side():
         UnitreeG1Config(is_simulation=False, hands={"left": HandConfig(side="right")})
 
 
+def test_body_homing_does_not_read_disconnected_hands(make_robot):
+    from lerobot.robots.unitree_g1.hand_system import HandConfig
+    from tests.robots.test_unitree_g1_hands import Device
+
+    factory, mocks = make_robot
+    with patch("lerobot.robots.unitree_g1.hand_collection.make_hand", side_effect=Device):
+        robot = arm_for_publish(
+            factory(is_simulation=False, hands={"left": HandConfig(side="left")}), mocks
+        )
+    robot._lowstate = mocks["lowstate_msg"]
+    robot.hands.devices["left"].fail = "read"
+    with patch("lerobot.robots.unitree_g1.unitree_g1.time.sleep"):
+        robot.reset(control_dt=1.0)
+    assert mocks["publisher_mock"].Write.call_count == 3
+    assert robot.hands.devices["left"].writes == 0
+
+
 class TestEmbodimentDriver:
     def test_g1_29_connect_still_uses_existing_backend(self, make_robot):
         factory, _ = make_robot
