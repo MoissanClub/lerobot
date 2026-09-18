@@ -23,6 +23,7 @@ from lerobot.envs.configs import G1EndEffector, UnitreeG1MujocoEnv
 from ..config import RobotConfig
 from .g1_embodiments import get_g1_embodiment
 from .g1_utils import NUM_MOTORS
+from .hand_system import HandConfig
 
 _GAINS: dict[str, dict[str, list[float]]] = {
     "left_leg": {
@@ -106,12 +107,18 @@ class UnitreeG1Config(RobotConfig):
     controller: str | None = None
 
     embodiment: str = "g1_29"
+    hands: dict[str, HandConfig] = field(default_factory=dict)
     # Explicit opt-in: local supported-arm physics, no DDS/SDK or asset download.
     simulation_urdf: str | None = None
     simulation_mesh_dir: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
+        for side, hand in self.hands.items():
+            if side not in ("left", "right") or hand.side != side:
+                raise ValueError("Hand dictionary key must match configured left/right side")
+        if self.hands and self.is_simulation:
+            raise ValueError("Configured physical hand drivers cannot be used in simulation")
         spec = get_g1_embodiment(self.embodiment)
         if self.simulation_urdf is not None:
             if not self.simulation_urdf or not self.is_simulation or self.controller or self.cameras:

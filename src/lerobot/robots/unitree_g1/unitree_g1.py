@@ -39,6 +39,7 @@ from .g1_utils import (
     REMOTE_AXES,
     default_remote_input,
 )
+from .hand_collection import HandCollection
 
 if TYPE_CHECKING or _unitree_sdk_available:
     from unitree_sdk2py.core.channel import (
@@ -161,6 +162,7 @@ class UnitreeG1(Robot):
         logger.info("Initialize UnitreeG1...")
 
         self.config = config
+        self.hands = HandCollection(config.hands)
         self._native = None
         self.embodiment = get_g1_embodiment(config.embodiment)
         self.joint_index = self.embodiment.joint_index
@@ -296,6 +298,10 @@ class UnitreeG1(Robot):
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
+        return {**self._body_observation_features, **self.hands.features("observation_features")}
+
+    @cached_property
+    def _body_observation_features(self) -> dict[str, type | tuple]:
         # A controller advertising its own proprio state (SONIC's 64-D token echo) replaces the
         # raw joint positions rather than extending them, the way action_features hands the
         # action space over to the controller.
@@ -305,6 +311,10 @@ class UnitreeG1(Robot):
 
     @cached_property
     def action_features(self) -> dict[str, type]:
+        return {**self._body_action_features, **self.hands.features("action_features")}
+
+    @cached_property
+    def _body_action_features(self) -> dict[str, type]:
         # No controller configured: joint targets for the selected embodiment.
         if self.controller is None:
             return {f"{motor.name}.q": float for motor in self.joint_index}
@@ -372,7 +382,23 @@ class UnitreeG1(Robot):
     def configure(self) -> None:
         pass
 
-    def connect(self, calibrate: bool = True) -> None:  # connect to DDS
+    def connect(self, calibrate: bool = True) -> None:
+        if self.is_connected:
+            raise RuntimeError("Already connected")
+        try:
+            self._connect_body(calibrate=calibrate)
+            self.hands.connect()
+        except BaseException as exc:
+            self._cleanup_composite_failure(exc)
+            raise
+
+    def _cleanup_composite_failure(self, exc):
+        try:
+            self.disconnect()
+        except Exception as cleanup:
+            exc.add_note(f"Cleanup also failed: {cleanup}")
+
+    def _connect_body(self, calibrate: bool = True) -> None:  # connect to DDS
         if self.config.simulation_urdf is not None:
             if self._native is not None:
                 raise RuntimeError("Already connected")
@@ -474,6 +500,16 @@ class UnitreeG1(Robot):
             logger.warning(f"Failed to send zero-torque on disconnect: {e}")
 
     def disconnect(self):
+        errors = []
+        for close in (self.hands.disconnect, self._disconnect_body):
+            try:
+                close()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise ExceptionGroup("G1 disconnect failed", errors)
+
+    def _disconnect_body(self):
         if self.config.simulation_urdf is not None:
             if self._native is not None:
                 self._native.close()
@@ -526,6 +562,17 @@ class UnitreeG1(Robot):
             cam.disconnect()
 
     def get_observation(self) -> RobotObservation:
+        if not self.hands.devices:
+            return self._get_body_observation()
+        if not self.is_connected:
+            raise RuntimeError("Body and configured hands must all be connected")
+        try:
+            return {**self._get_body_observation(), **self.hands.observation()}
+        except BaseException as exc:
+            self._cleanup_composite_failure(exc)
+            raise
+
+    def _get_body_observation(self) -> RobotObservation:
         if self.config.simulation_urdf is not None:
             return {} if self._native is None else self._native.observation()
         with self._lowstate_lock:
@@ -587,6 +634,22 @@ class UnitreeG1(Robot):
         return obs
 
     def send_action(self, action: RobotAction) -> RobotAction:
+        if not self.hands.devices:
+            return self._send_body_action(action)
+        if not self.is_connected:
+            raise RuntimeError("Body and configured hands must all be connected")
+        if set(action) - set(self.action_features):
+            raise ValueError("Unknown action keys")
+        prepared = self.hands.prepare(action)
+        body = {key: value for key, value in action.items() if not key.startswith("hands.")}
+        try:
+            result = self._send_body_action(body) if body else {}
+            return {**result, **self.hands.send(prepared)}
+        except BaseException as exc:
+            self._cleanup_composite_failure(exc)
+            raise
+
+    def _send_body_action(self, action: RobotAction) -> RobotAction:
         if self.config.simulation_urdf is not None:
             if self._native is None:
                 raise RuntimeError("Not connected")
@@ -643,6 +706,10 @@ class UnitreeG1(Robot):
 
     @property
     def is_connected(self) -> bool:
+        return self._body_is_connected and self.hands.is_connected
+
+    @property
+    def _body_is_connected(self) -> bool:
         if self.config.simulation_urdf is not None:
             return self._native is not None
         with self._lowstate_lock:
@@ -701,7 +768,8 @@ class UnitreeG1(Robot):
                 num_steps = int(total_time / control_dt)
 
                 # get current state
-                obs = self.get_observation()
+                # Body homing may precede hand connection during controller startup.
+                obs = self._get_body_observation()
 
                 # record current positions
                 init_dof_pos = np.zeros(NUM_MOTORS, dtype=np.float32)
