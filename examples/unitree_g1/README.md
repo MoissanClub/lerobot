@@ -3,7 +3,7 @@
 This example verifies the shared G1-29/G1-23 kinematics layer in the checked-out
 LeRobot fork. It does not connect DDS, a physical robot, or XR. The viewer loads
 each embodiment's native URDF and sets joint positions directly: it is kinematic
-playback, not motor dynamics. Existing G1-29 runtime behavior is unchanged;
+playback, not motor dynamics. Existing G1-29 Hub runtime behavior is unchanged.
 Parent: `g1/simulation`. Both embodiments already have joint-level native simulation;
 this branch adds Cartesian targets without making the solver depend on MuJoCo.
 Physical G1-23 connections remain disabled.
@@ -50,15 +50,18 @@ separately. The solver itself takes an explicit URDF path and never downloads.
 
 ## Automated Acceptance
 
-Run the cumulative embodiment and Cartesian suites:
+Run the cumulative embodiment, simulation, and Cartesian suites:
 
 ```bash
-python -m pytest -q \
+G1_RENDER_TESTS=1 MUJOCO_GL=egl python -m pytest -q \
   tests/robots/test_unitree_g1.py \
   tests/robots/test_unitree_g1_utils.py \
   tests/robots/test_unitree_g1_embodiments.py \
   tests/teleoperators/test_unitree_g1_teleoperator.py \
   tests/robots/test_sonic_whole_body.py \
+  tests/robots/test_unitree_g1_simulation.py \
+  tests/integration/test_unitree_g1_mujoco_runtime.py \
+  tests/robots/test_unitree_g1_action_processor.py \
   tests/robots/test_unitree_g1_cartesian_control.py \
   tests/robots/test_unitree_g1_kinematics.py
 ```
