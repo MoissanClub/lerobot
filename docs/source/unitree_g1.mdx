@@ -7,8 +7,8 @@
 />
 
 The Unitree G1 humanoid is supported in LeRobot. G1-29 retains the existing runtime,
-simulation, and controller interfaces. G1-23 currently has embodiment configuration
-and joint-mapping support; its runtime integration is not enabled by this layer.
+simulation, and controller interfaces. Both embodiments support explicit local,
+fixed-base arm simulation. G1-23 Hub locomotion and physical operation remain gated.
 
 ## Embodiment Selection
 
@@ -26,9 +26,9 @@ config = UnitreeG1Config(embodiment="g1_23")
 |---|---|---|
 | Joint configuration and action/observation features | 29 body joints, 14 arm joints | 23 body joints, 10 arm joints |
 | Sparse command/feedback mapping | Existing layout | Implemented and tested with mocked transport |
-| Simulation connection | Existing Hub environment | Not implemented; rejected before transport initialization |
+| Simulation connection | Existing Hub environment or explicit local URDF | Explicit local URDF, fixed-base arms only |
 | Physical connection | Existing interface, separate hardware requirements | Not supported; rejected before transport initialization |
-| Gravity compensation | Existing solver, off by default | Rejected until the G1-23 kinematics implementation is added |
+| Gravity compensation | Existing physical solver; MuJoCo gravity for local simulation | MuJoCo measured-pose gravity in local simulation only |
 | Locomotion/whole-body controllers | Existing G1-29 controllers | Rejected; no implicit G1-29 controller reuse |
 
 **Joint counts are not transport widths.** Both configurations use 29-element `kp`, `kd`,
@@ -52,8 +52,8 @@ an implemented G1-23 solver. G1-29 keeps its existing Hub runtime unchanged. Fut
 kinematics/simulation integration must select compatible, pinned model revisions;
 joint count alone does not identify a hardware/model revision.
 
-Shared IK/FK, a G1-23 simulator, XR/video, and optional hand composition are separate
-extensions. This layer deliberately cannot connect a G1-23 configuration to the existing
+Cartesian IK/FK, XR/video, and optional hand composition are separate extensions.
+Without an explicit local URDF, this layer cannot connect G1-23 to the existing
 G1-29 simulator. No physical robot was used for the embodiment regression tests.
 
 ### Embodiment Regression Tests
@@ -104,6 +104,11 @@ pip install -e '.[unitree_g1]'
 </Tip>
 
 ### Test the Installation (Simulation)
+
+For joint-level local G1-23/G1-29 simulation without Cartesian control, see
+[`examples/unitree_g1/SIMULATION.md`](https://github.com/MoissanClub/lerobot/blob/g1/simulation/examples/unitree_g1/SIMULATION.md).
+It uses the same `lerobot-teleoperate` command with explicit `simulation_urdf` and
+`simulation_mesh_dir` paths. The following Hub/locomotion workflow remains G1-29-only.
 
 The simulation environment has its own dependencies. Check the Simulation environment dependencies: [Unitree G1 Mujoco EnvHub](https://huggingface.co/lerobot/unitree-g1-mujoco/tree/main).
 

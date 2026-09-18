@@ -80,7 +80,7 @@ class UnitreeG1Config(RobotConfig):
     is_simulation: bool = True
 
     # Supports dummy, dex1, dex3
-    end_effector: G1EndEffector = G1EndEffector.DEX1
+    end_effector: G1EndEffector | None = None
 
     # Loads the lerobot/unitree-g1-mujoco environment
     sim_env: UnitreeG1MujocoEnv = field(init=False)
@@ -106,13 +106,27 @@ class UnitreeG1Config(RobotConfig):
     controller: str | None = None
 
     embodiment: str = "g1_29"
+    # Explicit opt-in: local supported-arm physics, no DDS/SDK or asset download.
+    simulation_urdf: str | None = None
+    simulation_mesh_dir: str | None = None
 
     def __post_init__(self):
         super().__post_init__()
         spec = get_g1_embodiment(self.embodiment)
+        if self.simulation_urdf is not None:
+            if not self.simulation_urdf or not self.is_simulation or self.controller or self.cameras:
+                raise ValueError(
+                    "Native simulation requires a URDF, simulation mode, and no external controller/cameras"
+                )
+            if not isfinite(self.control_dt) or self.control_dt <= 0 or self.control_dt > 0.1:
+                raise ValueError("Native control_dt must be in (0, 0.1]")
         if self.controller is not None and not spec.supports_controller:
             raise ValueError(f"Controllers are not supported for {self.embodiment}")
-        if self.gravity_compensation and not spec.supports_gravity_compensation:
+        if (
+            self.gravity_compensation
+            and not spec.supports_gravity_compensation
+            and self.simulation_urdf is None
+        ):
             raise ValueError(f"Gravity compensation is not implemented for {self.embodiment}")
         default_kp, default_kd = (_DEFAULT_KP, _DEFAULT_KD) if self.embodiment == "g1_29" else _g1_23_gains()
         self.kp = list(default_kp if self.kp is None else self.kp)
@@ -126,7 +140,11 @@ class UnitreeG1Config(RobotConfig):
                 raise ValueError(f"{name} must be nonnegative")
             if any(values[index] != 0 for index in inactive):
                 raise ValueError(f"{name} must be zero at inactive {self.embodiment} DDS slots")
-        self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
+        if self.end_effector is None:
+            self.end_effector = G1EndEffector.DUMMY if self.simulation_urdf else G1EndEffector.DEX1
+        self.end_effector = G1EndEffector(self.end_effector)
+        if self.simulation_urdf and self.end_effector != G1EndEffector.DUMMY:
+            raise ValueError("Native diagnostic simulation supports only dummy end effectors")
         self.sim_env = UnitreeG1MujocoEnv(
             publish_images=self.sim_publish_images,
             camera_port=self.sim_camera_port,

@@ -154,12 +154,14 @@ class UnitreeG1(Robot):
     name = "unitree_g1"
 
     def __init__(self, config: UnitreeG1Config):
-        require_package("unitree-sdk2py", extra="unitree_g1", import_name="unitree_sdk2py")
+        if config.simulation_urdf is None:
+            require_package("unitree-sdk2py", extra="unitree_g1", import_name="unitree_sdk2py")
         super().__init__(config)
 
         logger.info("Initialize UnitreeG1...")
 
         self.config = config
+        self._native = None
         self.embodiment = get_g1_embodiment(config.embodiment)
         self.joint_index = self.embodiment.joint_index
         self.arm_index = self.embodiment.arm_index
@@ -198,7 +200,9 @@ class UnitreeG1(Robot):
         self._shutdown_event = threading.Event()
         self.subscribe_thread = None
 
-        self.arm_ik = G1_29_ArmIK() if config.gravity_compensation else None
+        self.arm_ik = (
+            G1_29_ArmIK() if config.gravity_compensation and config.simulation_urdf is None else None
+        )
 
         # Controller loaded dynamically
         self.controller: RobotController | None = make_robot_controller(config.controller)
@@ -369,6 +373,13 @@ class UnitreeG1(Robot):
         pass
 
     def connect(self, calibrate: bool = True) -> None:  # connect to DDS
+        if self.config.simulation_urdf is not None:
+            if self._native is not None:
+                raise RuntimeError("Already connected")
+            from .g1_simulation import G1Simulation
+
+            self._native = G1Simulation(self.config)
+            return
         # Fail before creating a transport, camera connection, or mismatched simulator.
         if self.config.is_simulation and self.embodiment.simulation_env is None:
             raise NotImplementedError(f"Simulation is not implemented for {self.embodiment.name}")
@@ -463,6 +474,11 @@ class UnitreeG1(Robot):
             logger.warning(f"Failed to send zero-torque on disconnect: {e}")
 
     def disconnect(self):
+        if self.config.simulation_urdf is not None:
+            if self._native is not None:
+                self._native.close()
+                self._native = None
+            return
         # Signal threads to stop and unblock any waits
         self._shutdown_event.set()
 
@@ -510,6 +526,8 @@ class UnitreeG1(Robot):
             cam.disconnect()
 
     def get_observation(self) -> RobotObservation:
+        if self.config.simulation_urdf is not None:
+            return {} if self._native is None else self._native.observation()
         with self._lowstate_lock:
             lowstate = self._lowstate
         if lowstate is None:
@@ -569,6 +587,14 @@ class UnitreeG1(Robot):
         return obs
 
     def send_action(self, action: RobotAction) -> RobotAction:
+        if self.config.simulation_urdf is not None:
+            if self._native is None:
+                raise RuntimeError("Not connected")
+            if any(action.get(key, 0) != 0 for key in REMOTE_AXES):
+                raise ValueError("Native supported-arm simulation does not support locomotion")
+            return self._native.send_action(
+                {key: value for key, value in action.items() if key not in REMOTE_AXES}
+            )
         action_to_publish = action
         if self.controller is not None:
             # Controller thread owns legs/waist. Here we only update joystick inputs
@@ -617,6 +643,8 @@ class UnitreeG1(Robot):
 
     @property
     def is_connected(self) -> bool:
+        if self.config.simulation_urdf is not None:
+            return self._native is not None
         with self._lowstate_lock:
             return self._lowstate is not None
 
@@ -629,11 +657,27 @@ class UnitreeG1(Robot):
     def cameras(self) -> dict:
         return self._cameras
 
+    def step_simulation(self) -> None:
+        """Advance one native control period while holding the last targets."""
+        if self._native is None:
+            raise RuntimeError("Native simulator is not connected")
+        self._native.step()
+
+    def render_simulation(self, width: int = 640, height: int = 480, head_camera: bool = True):
+        if self._native is None:
+            raise RuntimeError("Native simulator is not connected")
+        return self._native.render(width, height, head_camera)
+
     def reset(
         self,
         control_dt: float | None = None,
         default_positions: list[float] | None = None,
     ) -> None:  # move robot to default position
+        if self.config.simulation_urdf is not None:
+            if self._native is None:
+                raise RuntimeError("Not connected")
+            self._native.reset(default_positions)
+            return
         if control_dt is None:
             control_dt = self.config.control_dt
         if default_positions is None:
