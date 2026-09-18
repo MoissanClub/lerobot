@@ -13,7 +13,7 @@ The IK loop reads a bounded mailbox and preserves acquisition timestamps.
 Video/session failure is explicit; disconnect/reconnect and reset the clutch.
 The mono monitor follows the head; it is not stereo depth or an HMD-driven camera.
 
-With simulation + XR/video branches merged, pinned assets prepared, and the SDK
+On this branch (which inherits simulation and Cartesian control), with pinned assets prepared and the SDK
 installed in the active environment:
 
 ```bash
