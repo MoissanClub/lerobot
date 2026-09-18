@@ -105,6 +105,11 @@ pip install -e '.[unitree_g1]'
 
 ### Test the Installation (Simulation)
 
+For joint-level local G1-23/G1-29 simulation without Cartesian control, see
+[`examples/unitree_g1/SIMULATION.md`](https://github.com/MoissanClub/lerobot/blob/g1/simulation/examples/unitree_g1/SIMULATION.md).
+It uses the same `lerobot-teleoperate` command with explicit `simulation_urdf` and
+`simulation_mesh_dir` paths. The following Hub/locomotion workflow remains G1-29-only.
+
 The simulation environment has its own dependencies. Check the Simulation environment dependencies: [Unitree G1 Mujoco EnvHub](https://huggingface.co/lerobot/unitree-g1-mujoco/tree/main).
 
 ```bash
