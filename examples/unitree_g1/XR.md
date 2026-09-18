@@ -34,8 +34,8 @@ updating the SDK; native failures inside a context's own entry remain vendor-own
 
 The SDK interface follows the existing NVIDIA Isaac Teleop example in this
 repository; installation instructions remain in `examples/isaac_teleop_to_so101`.
-The unit suite needs no SDK/headset. The combined simulation test needs the
-simulation branch merged as well as pinned model assets:
+The unit suite needs no SDK/headset. Simulation is already inherited through
+the Cartesian parent; its integration test additionally needs pinned model assets:
 
 ```bash
 PYTHONPATH=src python -m pytest tests/teleoperators/test_unitree_g1_xr.py -q
