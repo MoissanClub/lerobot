@@ -736,6 +736,7 @@ class G1EndEffector(str, Enum):
     DUMMY = "dummy"  # bare wrists
     DEX1 = "dex1"  # parallel grippers
     DEX3 = "dex3"  # three-finger hands
+    BRAINCO = "brainco"  # physical Revo2 driver; no simulated hand model yet
 
     @classmethod
     def _missing_(cls, value: object) -> None:
@@ -764,6 +765,8 @@ class UnitreeG1MujocoEnv(HubEnvConfig):
 
     def __post_init__(self) -> None:
         self.end_effector = G1EndEffector(self.end_effector)
+        if self.end_effector == G1EndEffector.BRAINCO:
+            raise ValueError("BrainCo simulation requires an articulated model that is not implemented")
         if self.onscreen is None:
             self.onscreen = not self.publish_images
         elif self.onscreen and self.publish_images:
