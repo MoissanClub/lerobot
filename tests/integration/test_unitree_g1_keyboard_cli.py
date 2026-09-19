@@ -12,6 +12,10 @@ import pytest
 
 @pytest.mark.skipif(not os.getenv("G1_KEYBOARD_HUB_TESTS"), reason="Requires Hub model, DDS, and POSIX PTY")
 def test_headless_keyboard_cli(tmp_path):
+    run_keyboard_cli(tmp_path)
+
+
+def run_keyboard_cli(tmp_path, extra_args=()):
     import pty
 
     master, slave = pty.openpty()
@@ -28,10 +32,11 @@ def test_headless_keyboard_cli(tmp_path):
         "--robot.sim_onscreen=false",
         "--robot.cameras={}",
         "--teleop.type=unitree_g1_keyboard",
+        f"--teleop.calibration_dir={tmp_path / 'calibration'}",
         "--display_data=false",
         "--teleop_time_s=12",
     ]
-    process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave, env=env)
+    process = subprocess.Popen([*command, *extra_args], stdin=slave, stdout=slave, stderr=slave, env=env)
     os.close(slave)
     output = ""
     sent = False

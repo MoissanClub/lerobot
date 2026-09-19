@@ -52,6 +52,31 @@ rejected pending a separate safety/acceptance review.
 
 ## Verification
 
+On the native simulation branch, select the backend explicitly. Repeat with
+`MODEL=g1_29` and `MODEL=g1_23`; prepare pinned assets using
+`examples/unitree_g1/prepare_cartesian_assets.py --output "$G1_KINEMATICS_ASSETS" --meshes`.
+
+```bash
+MODEL=g1_23
+MUJOCO_GL=glfw lerobot-teleoperate \
+  --robot.type=unitree_g1 --robot.embodiment="$MODEL" --robot.is_simulation=true \
+  --robot.simulation_urdf="$G1_KINEMATICS_ASSETS/$MODEL.urdf" \
+  --robot.simulation_mesh_dir="$G1_KINEMATICS_ASSETS/meshes" \
+  --robot.gravity_compensation=true \
+  --robot.sim_publish_images=false --robot.sim_onscreen=true --robot.cameras='{}' \
+  --teleop.type=unitree_g1_keyboard --display_data=true --display_mode=rerun
+```
+
+Run the native integration suite with assets set:
+
+```bash
+MUJOCO_GL=egl python -m pytest -q tests/integration/test_unitree_g1_keyboard_native.py
+```
+
+It checks every arm joint's mapping, target isolation, model bounds, physical
+response, and the actual terminal CLI for both embodiments. This backend is
+fixed-base and collision-free; it does not establish physical safety.
+
 Install the existing G1 Hub simulator and DDS dependencies. On this workstation
 the native CycloneDDS build selected by `lerobot-dev` is required; an older system
 library can abort inside the SDK before keyboard control starts. Do not run two
