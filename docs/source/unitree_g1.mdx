@@ -73,6 +73,16 @@ download, or hardware connection is required. The runtime instructions below app
 
 ---
 
+### Shared Cartesian Control
+
+`lerobot.robots.unitree_g1.g1_cartesian_control` provides explicit-model dual-arm
+FK/IK and static feedforward. It uses Pinocchio/CasADi but does not import MuJoCo,
+XR, or a physical transport. The registered Cartesian action processor converts
+root-frame hand targets and measured joints into bounded named joint commands.
+See `examples/unitree_g1/README.md` for the numerical and visual acceptance suite.
+Joint-level simulation below does not need this layer; Cartesian keyboard targets,
+task-space policies, and pose-based XR control do.
+
 ## Part 1: Getting Started
 
 ### Install the Unitree SDK
