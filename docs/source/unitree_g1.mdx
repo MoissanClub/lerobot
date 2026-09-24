@@ -68,6 +68,70 @@ This will launch a [MuJoCo sim instance](https://huggingface.co/lerobot/unitree-
 
 `--robot.end_effector` says what the arms carry: `dex1` for the parallel grippers (the default), `dex3` for the three-finger hands, or `dummy` for bare wrists. In simulation it picks the MuJoCo model, which decides the finger actuators and which cameras the scene carries — the wrist cameras are mounted on the end effector, so `dummy` only has `head_camera`.
 
+The experimental `brainco` selection adds articulated REVO2 hands in simulation
+with a matching Hub environment implementing `brainco_interface_version=1`.
+Use `--robot.sim_hub_path=OWNER/REPO@COMMIT` to pin that environment.
+An experimental snapshot is published at
+`davidwei79/unitree-g1-mujoco-brainco@99806d8c7e9b8dc4c1cd500450c3f563a52a8953`.
+The default upstream Hub release does not contain this extension.
+Physical use of this selection is rejected before opening any connections.
+
+BrainCo adds twelve float action/observation fields:
+`hands.left.motor_0.pos` through `hands.left.motor_5.pos`, and the corresponding
+`hands.right.*` fields. Motor order is thumb proximal, thumb metacarpal, index,
+middle, ring, pinky. Commands are finite fractions in `[0, 1]` of the simulation
+model's feasible ranges, not calibrated SDK positions. Observations are measured
+fractions and may differ from commands under contact. Partial commands preserve
+other targets. Hands extend the body's or controller's existing feature schema;
+they do not replace it. Existing teleoperators do not automatically generate
+these fields.
+
+The Hub owns hand joints, coupling, control gains and normalization. LeRobot
+forwards hand commands to the in-process simulator while body control keeps its
+DDS transport. No BrainCo hardware SDK or serial device is used. This mode has
+only the head camera. Wrist mount calibration, hardware behavior, dataset
+conversion and handshake replay remain separate validation tasks.
+
+For development against an unpublished Hub checkout, run the opt-in acceptance
+test from the LeRobot checkout with its dependencies installed:
+
+```bash
+G1_BRAINCO_HUB_CHECKOUT=/path/to/unitree-g1-mujoco MUJOCO_GL=egl \
+  python -m pytest tests/robots/test_unitree_g1_brainco_sim.py -v
+```
+
+This test redirects only Hub file resolution to the supplied checkout. It uses
+real MuJoCo physics, real DDS body commands, and the standard Robot API for both
+hands. Run in a dedicated simulation session, with no physical DDS peers.
+
+To verify the published snapshot using the normal downloader, rather than the
+local resolver, use:
+
+```bash
+unset G1_BRAINCO_HUB_CHECKOUT
+export G1_BRAINCO_HUB_PATH=davidwei79/unitree-g1-mujoco-brainco@99806d8c7e9b8dc4c1cd500450c3f563a52a8953
+python -m pytest tests/robots/test_unitree_g1_brainco_sim.py -v
+```
+
+For a bounded live visual demonstration, on a machine with a working OpenGL
+display, run the same test file directly:
+
+```bash
+python tests/robots/test_unitree_g1_brainco_sim.py \
+  --viewer
+```
+
+By default it downloads the pinned experimental HF simulator above, not a dataset.
+It moves each of the six controls on each hand individually and reopens it before
+the next control. One cycle takes approximately 38 seconds plus startup, without
+commanding arm motion. Measured hand errors are checked at each pose. Use
+`--motion combined` for the separate arm-and-hand regression sequence.
+Mocked unit tests live in `tests/robots/test_unitree_g1_brainco.py` and need no download. Closing the window or
+pressing Ctrl+C cancels the sequence without reporting an acceptance pass.
+The viewer uses GLFW; SSH X forwarding must support GLX, not just ordinary
+X windows. Use `--headless` for EGL/no-window execution if GLX is unavailable.
+The visual option is not a separate teleoperator or replay implementation.
+
 ```bash
 lerobot-teleoperate \
   --robot.type=unitree_g1 \

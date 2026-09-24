@@ -60,11 +60,12 @@ class UnitreeG1Config(RobotConfig):
     # Launch mujoco simulation
     is_simulation: bool = True
 
-    # Supports dummy, dex1, dex3
+    # BrainCo currently supports simulation only.
     end_effector: G1EndEffector = G1EndEffector.DEX1
 
     # Loads the lerobot/unitree-g1-mujoco environment
     sim_env: UnitreeG1MujocoEnv = field(init=False)
+    sim_hub_path: str = "lerobot/unitree-g1-mujoco"
 
     # Where the sim's cameras are published, or its viewer instead when publishing is off.
     sim_publish_images: bool = True
@@ -89,7 +90,10 @@ class UnitreeG1Config(RobotConfig):
     def __post_init__(self):
         super().__post_init__()
         self.end_effector = G1EndEffector(self.end_effector)  # from Python it is still a string
+        if self.end_effector == G1EndEffector.BRAINCO and not self.is_simulation:
+            raise ValueError("BrainCo end-effector control is currently simulation-only")
         self.sim_env = UnitreeG1MujocoEnv(
+            hub_path=self.sim_hub_path,
             publish_images=self.sim_publish_images,
             camera_port=self.sim_camera_port,
             onscreen=self.sim_onscreen,

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 import numpy as np
 
 from lerobot.cameras import DepthCamera, make_cameras_from_configs
+from lerobot.envs.configs import G1EndEffector
 from lerobot.lerobot_types import RobotAction, RobotObservation
 from lerobot.utils.import_utils import _unitree_sdk_available, require_package
 
@@ -283,31 +284,37 @@ class UnitreeG1(Robot):
         return features
 
     @cached_property
+    def _hands_ft(self) -> dict[str, type]:
+        if self.config.end_effector != G1EndEffector.BRAINCO:
+            return {}
+        return {f"hands.{side}.motor_{i}.pos": float for side in ("left", "right") for i in range(6)}
+
+    @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
         # A controller advertising its own proprio state (SONIC's 64-D token echo) replaces the
         # raw joint positions rather than extending them, the way action_features hands the
         # action space over to the controller.
         controller_ft = getattr(self.controller, "observation_ft", None)
         proprio_ft = self._motors_ft if controller_ft is None else dict(controller_ft)
-        return {**proprio_ft, **self._cameras_ft}
+        return {**proprio_ft, **self._hands_ft, **self._cameras_ft}
 
     @cached_property
     def action_features(self) -> dict[str, type]:
         # No controller configured at all: raw 29-DoF joint teleop.
         if self.controller is None:
-            return {f"{G1_29_JointIndex(motor).name}.q": float for motor in G1_29_JointIndex}
+            return {**{f"{motor.name}.q": float for motor in G1_29_JointIndex}, **self._hands_ft}
 
         # Whole-body controllers (SONIC): 64-D latent token.
         controller_ft = getattr(self.controller, "action_ft", None)
         if controller_ft is not None:
-            return dict(controller_ft)
+            return {**controller_ft, **self._hands_ft}
 
         # Locomotion controllers (GR00T / Holosoma): arm joint targets + joystick axes.
         # TODO: have GR00T/Holosoma advertise their own action_features too, so every
         # controller declares its action space and this fallthrough can be dropped.
         arm_features = {f"{G1_29_JointArmIndex(motor).name}.q": float for motor in G1_29_JointArmIndex}
         remote_features = dict.fromkeys(REMOTE_AXES, float)
-        return {**arm_features, **remote_features}
+        return {**arm_features, **remote_features, **self._hands_ft}
 
     def _controller_loop(self):
         """Background thread that runs controller at policy's control_dt."""
@@ -369,6 +376,17 @@ class UnitreeG1(Robot):
             self._env_wrapper = make_env(self.config.sim_env, trust_remote_code=True)
             # Extract the actual gym env from the dict structure
             self.sim_env = self._env_wrapper["hub_env"][0].envs[0]
+            if self._hands_ft and (
+                getattr(self.sim_env, "brainco_interface_version", None) != 1
+                or not callable(getattr(self.sim_env, "send_hand_action", None))
+                or not callable(getattr(self.sim_env, "get_hand_observation", None))
+            ):
+                self.sim_env.close()
+                self.sim_env = None
+                self._env_wrapper = None
+                raise RuntimeError(
+                    "BrainCo requires a Hub simulator with hand interface v1; check sim_hub_path"
+                )
         else:
             self._ChannelFactoryInitialize(0, config=self.config)
 
@@ -479,7 +497,7 @@ class UnitreeG1(Robot):
                     sim_env_inner = self.sim_env.simulator.sim_env
                     if hasattr(sim_env_inner, "image_publish_process"):
                         proc = sim_env_inner.image_publish_process
-                        if proc.process and proc.process.is_alive():
+                        if proc is not None and proc.process and proc.process.is_alive():
                             logger.info("Force-terminating image publish subprocess...")
                             proc.stop_event.set()
                             proc.process.terminate()
@@ -546,6 +564,9 @@ class UnitreeG1(Robot):
         if self.controller is not None and hasattr(self.controller, "observation_state"):
             obs.update(self.controller.observation_state())
 
+        if self._hands_ft:
+            obs.update(self.sim_env.get_hand_observation())
+
         # Cameras - read images from ZMQ cameras
         for cam_name, cam in self._cameras.items():
             if getattr(cam, "use_rgb", True):
@@ -556,15 +577,28 @@ class UnitreeG1(Robot):
         return obs
 
     def send_action(self, action: RobotAction) -> RobotAction:
-        action_to_publish = action
+        hand_action = {key: value for key, value in action.items() if key.startswith("hands.")}
+        if hand_action:
+            if set(hand_action) - self._hands_ft.keys():
+                raise ValueError("Hand action is not supported by the selected end effector")
+            values = np.asarray(list(hand_action.values()), dtype=float)
+            if not np.isfinite(values).all() or np.any((values < 0) | (values > 1)):
+                raise ValueError("BrainCo positions must be finite and in [0, 1]")
+            if self.sim_env is None:
+                raise RuntimeError("Connect the BrainCo simulation before sending hand actions")
+            self.sim_env.send_hand_action(hand_action)
+        body_action = {key: value for key, value in action.items() if key not in hand_action}
+        if hand_action and not body_action:
+            return action
+        action_to_publish = body_action
         if self.controller is not None:
             # Controller thread owns legs/waist. Here we only update joystick inputs
             # and publish arm targets from the teleoperator.
-            self._update_controller_action(action)
+            self._update_controller_action(body_action)
             arm_prefixes = tuple(j.name for j in G1_29_JointArmIndex)
             action_to_publish = {
                 key: value
-                for key, value in action.items()
+                for key, value in body_action.items()
                 if key.endswith(".q") and key.startswith(arm_prefixes)
             }
             if not action_to_publish:

@@ -736,6 +736,7 @@ class G1EndEffector(str, Enum):
     DUMMY = "dummy"  # bare wrists
     DEX1 = "dex1"  # parallel grippers
     DEX3 = "dex3"  # three-finger hands
+    BRAINCO = "brainco"  # REVO2 simulation (six motors per hand)
 
     @classmethod
     def _missing_(cls, value: object) -> None:
@@ -749,7 +750,8 @@ class UnitreeG1MujocoEnv(HubEnvConfig):
 
     The end effector selects the MuJoCo model, and with it the finger actuators and the
     wrist cameras that exist: "dummy" for bare wrists, "dex1" for the parallel grippers,
-    "dex3" for the three-finger hands.
+    "dex3" for the three-finger hands, "brainco" for simulation-only REVO2 hands
+    (requires a matching Hub revision; head camera only).
 
     The sim renders either its cameras or its window, never both: the offscreen contexts
     are bound to the thread that creates them, which is not the one driving the viewer.
