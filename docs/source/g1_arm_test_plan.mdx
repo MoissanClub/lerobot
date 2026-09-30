@@ -1,0 +1,223 @@
+# G1-29 Arm Validation: Ordered Operator Tests
+
+Execution order is **1, 2, 3, 6, 4, 5, 7** using the previously discussed step
+numbers. Simulation first, all read-only physical checks next, bounded physical
+motion next, physical VR last. Steps 4 and 5 apply torque and are real hardware
+tests. No physical test or headset acceptance was performed during implementation.
+
+| Step | Interface | Implemented | Physical motor commands |
+| --- | --- | --- | --- |
+| 1: simulated XR | Terminal and headset | Existing simulation example | None |
+| 2: physical feedback | Terminal | Arm SDK read-only diagnostic | None |
+| 3: physical camera | Terminal and headset | Camera producer plus video-only display | None |
+| 6: XR shadow | Terminal and headset | Read-only feedback plus existing clutch/IK, JSONL targets | None |
+| 4: hold | Terminal and supervising operator | Explicitly gated arm SDK diagnostic | Yes |
+| 5: single joint | Terminal and supervising operator | Explicitly gated arm SDK diagnostic | Yes |
+| 7: physical XR | Headset and supervising operator | Not implemented in this candidate | Future |
+
+Never run `run_g1_server.py` or another motor publisher for these tests. Its
+whole-body mode-release path is different. Do not run multiple XR applications
+against the same runtime. Stop each test before starting the next. Stop the XR
+consumer before stopping its camera producer. No test automatically advances to
+physical motion. JSONL `completed` means the loop finished, not operator acceptance.
+
+## Environment
+
+Branch: `work/g1-29-arm-hardware`. Use the same checkout and matching dependencies
+on PC2. The following paths are this development host's examples: replace them
+with the actual PC2 checkout, environment, pinned assets and CloudXR configuration.
+Do not assume a directory exists merely because the computer is called PC2.
+
+```bash
+cd /home/dwei/lerobot-sim/g1-arm-hardware
+source /home/dwei/lerobot-dev/environment/activate.sh
+export PYTHONPATH="$PWD/src" PYTHONNOUSERSITE=1
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MUJOCO_GL=egl
+PYTHON=/home/dwei/miniforge3/envs/lerobot-dev/bin/python
+ASSETS=/home/dwei/lerobot-dev/assets/ff42b91dc881922e010c
+URDF="$ASSETS/g1_29.urdf"
+CHANNEL=/tmp/lerobot-physical-camera.rgb
+CLOUDXR_CONFIG=/home/dwei/lerobot-sim/unitree_g1_lerobot/configs/cloudxr_quest3.env
+
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --urdf "$URDF" --write-template arm-contract.json
+```
+
+Run environment setup in every terminal. Reports/templates refuse overwrites:
+choose new names on repeat runs. Camera and XR must run under the same user on
+the same host for this frame channel. The implementation uses a local OpenCV
+RGB camera; other camera transports and stereo depth are not added here.
+Isaac Teleop, CUDA/Vulkan and a supported GPU with available memory are required
+for headset display, not for feedback inspection or synthetic shadow replay.
+`ssh -Y` is not needed for the headset monitor; it does not carry headset video.
+
+## Step 1: VR Controls Simulation
+
+For the latest checkout's automated test, no headset or physical DDS:
+
+```bash
+"$PYTHON" examples/unitree_g1/run_xr_simulation.py \
+  --assets "$ASSETS" --embodiment g1_29 --headless --steps 300
+```
+
+Expect a nonzero motion summary and camera frames, with exit 0. For an existing
+manual headset baseline, the installed operator repository provides:
+
+```bash
+./run_g1_vr_sim.sh --embodiment g1_29 --live-xr --accept-cloudxr-eula
+```
+
+Run that command from the operator repository, after reviewing its EULA. Add
+`--headless` for headset-only viewing. This operator launcher uses its configured
+pinned release, not necessarily this candidate. It is a headset baseline, not
+evidence of the new physical backend. To test this checkout with an externally
+configured CloudXR runtime and its runtime environment, use
+`run_xr_simulation.py --assets "$ASSETS" --embodiment g1_29 --video --steps 0`.
+
+With the headset, clutch/move/release one controller at a time. Verify independent
+left/right translation and rotation, no clutch-engagement jump, and release or
+tracking loss stops controller-driven changes. No physical process should publish.
+
+## Step 2: Physical Feedback Only
+
+Set `arm_sdk.network_interface` in the contract to the verified robot interface.
+Leave approval flags false. Run on the robot-side host:
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend hardware --phase read-only --contract arm-contract.json \
+  --output hardware-readonly-001.json
+```
+
+Inspect joint identity/positions, progressing ticks, feedback ages and mode bytes.
+Expect no induced movement or mode change. A mode byte alone does not identify
+the manufacturer's high-level mode or authorize motion. Stale or inconsistent
+feedback must fail rather than proceeding. Do not manually move a powered joint
+just to generate feedback changes.
+
+## Step 3: Physical Camera Only
+
+Terminal A: select the actual camera device (do not assume index 4 is correct).
+For example, after verifying `/dev/video4` and its supported 640x480 RGB capture:
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_xr_readonly.py camera \
+  --device /dev/video4 --channel "$CHANNEL" --duration-s 300 \
+  --output camera-001.jsonl
+```
+
+Terminal B, with the same environment, after reviewing the CloudXR EULA:
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_xr_readonly.py display \
+  --channel "$CHANNEL" --duration-s 120 --output display-001.jsonl \
+  --cloudxr-config "$CLOUDXR_CONFIG" --accept-cloudxr-eula
+```
+
+This starts only a private CloudXR runtime and the mono camera display, not a
+robot connection or controller-input reader. It refuses occupied runtime ports.
+Connect the headset using this host's IP at
+`https://nvidia.github.io/IsaacTeleop/client`; accept its certificate at
+`https://HOST:48322` if required. Omit the CloudXR options only if an external
+runtime is already running and its environment is configured in this terminal.
+
+Observe the actual camera viewpoint, correct image orientation/color and live
+motion of a visible clock or object. It is a mono monitor, not stereo vision.
+Stop the producer: expect `Camera unavailable or stale`, not a frozen image
+presented as live. Restart the producer with a new report filename: video should
+recover. On XR session failure restart the display; reconnect is not automatic.
+No camera report proves end-to-end latency: acquisition timestamps are local
+read-start times, not sensor hardware timestamps. Check perceived delay manually.
+
+## Step 6: XR Shadow, No Publication
+
+First exercise the same shadow loop offline against MuJoCo feedback:
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_xr_readonly.py shadow \
+  --feedback simulation --input synthetic --contract arm-contract.json \
+  --urdf "$URDF" --duration-s 6 --output shadow-sim-001.jsonl
+```
+
+Then stop the standalone display from step 3, keep/restart the camera producer,
+and run the physical read-only shadow application:
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_xr_readonly.py shadow \
+  --feedback hardware --input live --contract arm-contract.json --urdf "$URDF" \
+  --video --channel "$CHANNEL" --duration-s 120 --output shadow-hardware-001.jsonl \
+  --cloudxr-config "$CLOUDXR_CONFIG" --accept-cloudxr-eula
+```
+
+This forces read-only configuration even if the contract later approves motion.
+There is no enable-motion argument, activation or send call. Observe terminal
+`SHADOW ONLY` and `sent=0`. Clutch/move each hand independently; engaged flags and
+proposed joint/Cartesian targets should change, but the physical robot must not
+follow. The inactive arm's proposed targets match measured feedback. Release,
+tracking loss and stale XR samples must disengage. Re-engagement rebases from
+measured pose. Review `ik_status`, `ik_converged`, `within_motion_envelope`,
+target identity/direction and the report before considering later control.
+An IK mismatch or envelope violation is diagnostic evidence, not permission to
+publish. Target values are not physical commands. No hand driver is enabled.
+
+## Steps 4 and 5: Supervised Physical Motion
+
+Stop shadow/video tests. Complete the authority, waist, payload/gains, independent
+stop and packet-loss reviews in [the arm SDK guide](g1_arm_sdk_validation).
+Fill contract approval fields only after the actual checks. Step 4 applies torque
+even with no requested displacement; do not wear the headset for these tests.
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend hardware --phase hold --enable-motion \
+  --contract arm-contract.json --urdf "$URDF" --output hardware-hold-001.json
+```
+
+Observe both arms staying near initial pose without oscillation, unchanged
+intended lower-body ownership, and the reviewed handover on exit. Stop on any
+discrepancy. Only after reviewing this result, set operator-approved signed
+`REVIEWED_DELTA_RAD` and `REVIEWED_DURATION_S` for a bounded joint test:
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend hardware --phase joint --enable-motion \
+  --contract arm-contract.json --urdf "$URDF" --joint kLeftElbow.q \
+  --delta-rad "$REVIEWED_DELTA_RAD" --duration-s "$REVIEWED_DURATION_S" \
+  --output hardware-left-001.json
+```
+
+Observe the intended joint move out and return, correct direction and excursion,
+acceptable tracking and no unexpected other-arm/body movement. Review before
+repeating with `kRightElbow.q` and a new report. Software release packets are not
+proof of physical stop; the operator's independent stop remains necessary.
+
+## Step 7 and Evidence
+
+Physical live XR command publication remains unimplemented and gated on these
+results. Do not modify shadow mode to call send_action as a shortcut.
+
+Automated checks include forced failures on any shadow activation/publication,
+real MuJoCo shadow/hold/joint tests, frame ownership/freshness/recovery and XR
+clutch tests. A fake camera tests capture/channel plumbing. The physical camera
+and headset require manual acceptance. On this development host the offscreen
+GPU test was attempted but failed with CUDA out-of-memory while both GPUs were
+occupied by existing vLLM workers; those processes were not stopped.
+
+Local evidence (2026-09-29): broad regression **268 passed, 2 skipped** (optional
+BrainCo installed-SDK audit and opt-in GPU test). After adding the CPU-only
+camera-loss/recovery check, the final read-only suite passed **7 tests**. The
+separate opt-in GPU run failed as described above; it is not counted as passed.
+The actual headless G1-29 XR example completed 100 control frames and 50 camera
+frames with measured motion 0.2631 rad. MuJoCo hold/left/right diagnostic tests
+passed; none of this constitutes physical or headset acceptance.
+
+Reproduce the focused tests without contacting physical hardware:
+
+```bash
+export G1_INTEGRATION_TESTS=1 G1_KINEMATICS_ASSETS="$ASSETS"
+"$PYTHON" -m pytest -q tests/integration/test_unitree_g1_xr_readonly.py \
+  tests/integration/test_unitree_g1_arm_validation.py \
+  tests/robots/test_unitree_g1_arm_sdk.py \
+  tests/teleoperators/test_unitree_g1_xr.py \
+  tests/teleoperators/test_unitree_g1_xr_video.py
+```

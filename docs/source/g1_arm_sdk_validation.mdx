@@ -1,5 +1,9 @@
 # G1-29 Arm-Only Validation Candidate
 
+Start with the [ordered operator test plan](g1_arm_test_plan): simulation, physical
+read-only feedback, camera viewing, XR shadow, then supervised hold/joint tests.
+The commands below detail the arm SDK portion of that sequence.
+
 This is a supervised-validation candidate, not hardware acceptance. No physical
 motion was performed during implementation. Scope: G1-29's 14 arm joints, no hand
 driver, no walking commands, no SONIC. The legs and waist must remain under an
@@ -168,9 +172,11 @@ errors and whether release packets were sent. A failed/cancelled/unfinished run 
 not a pass. Exit 0 means software criteria only; `hardware_acceptance` remains
 `pending_operator_review` and `physical_stop_verified` is false.
 
-Hardware activation is never inferred from a simulation pass. This candidate stops
-at the first bounded joint tests; scripted physical IK, live physical XR, camera
-delivery, broader motion envelopes and collision handling remain subsequent gates.
+Hardware activation is never inferred from a simulation pass. Camera-only delivery
+and non-publishing XR shadow are implemented in `validate_xr_readonly.py`; physical
+camera/headset acceptance remains manual. This candidate stops at the first bounded
+joint tests; scripted physical IK motion, live physical XR commands, broader motion
+envelopes and collision handling remain subsequent gates.
 Existing XR simulation now gets measured arm positions through the public robot
 observation API, but its launcher remains simulation-only.
 

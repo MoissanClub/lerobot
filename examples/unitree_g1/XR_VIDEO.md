@@ -1,5 +1,9 @@
 # Camera delivery
 
+For physical camera-only viewing and non-publishing G1-29 XR shadow tests, see
+[`g1_arm_test_plan.mdx`](../../docs/source/g1_arm_test_plan.mdx) and
+`validate_xr_readonly.py`. These do not require a simulation or motor publisher.
+
 The generic Linux same-host RGB channel is `lerobot.cameras.frame_channel`.
 It has no simulator, DDS, OpenXR, or gRPC dependency. A single producer publishes
 bounded RGB frames with acquisition time and a session/sequence identity. Readers
