@@ -52,6 +52,7 @@ DEFAULT_GROOT_REPO_ID = "nepyope/GR00T-WholeBodyControl_g1"
 
 def load_groot_policies(
     repo_id: str = DEFAULT_GROOT_REPO_ID,
+    revision: str | None = None,
 ) -> tuple[ort.InferenceSession, ort.InferenceSession]:
     """Load GR00T dual-policy system (Balance + Walk) from the hub.
 
@@ -64,10 +65,12 @@ def load_groot_policies(
     balance_path = hf_hub_download(
         repo_id=repo_id,
         filename="GR00T-WholeBodyControl-Balance.onnx",
+        revision=revision,
     )
     walk_path = hf_hub_download(
         repo_id=repo_id,
         filename="GR00T-WholeBodyControl-Walk.onnx",
+        revision=revision,
     )
 
     # Load ONNX policies with a capped thread pool. GR00T runs at 50 Hz in a
@@ -88,9 +91,12 @@ class GrootLocomotionController(RobotController):
 
     control_dt = CONTROL_DT
 
-    def __init__(self):
+    def __init__(self, *, policy_revision: str | None = None):
         # Load policies
-        self.policy_balance, self.policy_walk = load_groot_policies()
+        if policy_revision is None:
+            self.policy_balance, self.policy_walk = load_groot_policies()
+        else:
+            self.policy_balance, self.policy_walk = load_groot_policies(revision=policy_revision)
 
         self.default_angles = GROOT_DEFAULT_ANGLES
         self.cmd = np.array([0.0, 0.0, 0.0], dtype=np.float32)  # vx, vy, theta_dot

@@ -55,7 +55,7 @@ class WeightedMovingFilter:
 
 
 class G1_29_ArmIK:  # noqa: N801
-    def __init__(self, unit_test=False):
+    def __init__(self, unit_test=False, *, assets_path=None):
         import casadi
         import pinocchio as pin
         from huggingface_hub import snapshot_download
@@ -64,7 +64,9 @@ class G1_29_ArmIK:  # noqa: N801
         self._pin = pin
         self.unit_test = unit_test
 
-        self.repo_path = snapshot_download("lerobot/unitree-g1-mujoco")
+        self.repo_path = (
+            str(assets_path) if assets_path is not None else snapshot_download("lerobot/unitree-g1-mujoco")
+        )
         urdf_path = os.path.join(self.repo_path, "assets", "g1_body29_hand14.urdf")
         mesh_dir = os.path.join(self.repo_path, "assets")
 
