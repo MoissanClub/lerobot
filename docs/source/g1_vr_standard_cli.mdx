@@ -1,0 +1,85 @@
+# G1 VR Through Standard LeRobot Teleoperation
+
+Development branch: `work/g1-vr-teleoperate`. The previous standalone checkpoint
+`work/g1-29-vr-teleop` at `2b9998b55` remains available for comparison.
+
+## Architecture and Review Boundaries
+
+1. `work/teleoperate-processors`: local saved action-pipeline configuration in
+   `lerobot-teleoperate`, plus reverse-order connection cleanup. Based directly
+   on bugfix checkpoint `321180e74`; no G1 or XR feature dependency.
+2. `work/g1-vr-teleoperate`: XR Teleoperator reads devices; a serializable action
+   processor maps poses and invokes upstream `G1_29_ArmIK`; a Robot implementation
+   owns simulation or gated physical transports. Uses the standard teleop loop.
+
+The second branch is a development candidate, not a proposed single large PR.
+Extract XR input, G1 processor, transport safety and video as reviewable changes
+after interface review. `unitree_g1_motion` is a provisional separate registration
+to avoid silently changing the existing `unitree_g1` whole-body behavior.
+Upstream acceptance and final configuration naming remain open.
+
+## Offline Verification
+
+2026-09-29 verification: 181 selected G1, XR, CLI and integration tests passed;
+one optional GPU test skipped. The isolated generic branch passed its three CLI
+tests. Both the installed `lerobot-teleoperate` entrypoint and the automated
+module invocation completed 100-frame headless replay with actual IK/GR00T.
+This is scoped regression evidence, not a claim that the entire LeRobot suite or
+live headset/hardware acceptance passed.
+
+From this checkout with its dependencies installed and editable import pointing
+here (not another LeRobot worktree):
+
+```bash
+python examples/unitree_g1/prepare_vr_assets.py \
+  --config-dir /tmp/g1-cli-replay --replay-frames 100
+MUJOCO_GL=egl lerobot-teleoperate --config_path=/tmp/g1-cli-replay/teleoperate.json
+```
+
+Uses pinned HF assets and policies, actual IK and MuJoCo/GR00T. Replay closes
+automatically; `report.jsonl` contains measured positions and command targets.
+Use a new output directory for another run: reports refuse overwrite.
+No headset, DDS publisher or physical robot is used. Replay is explicitly marked
+non-live and cannot activate the physical Robot.
+
+## Live Simulation
+
+```bash
+python examples/unitree_g1/prepare_vr_assets.py --config-dir /tmp/g1-cli-live
+MUJOCO_GL=egl lerobot-teleoperate \
+  --config_path=/tmp/g1-cli-live/teleoperate.json \
+  --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
+  --teleop.accept_cloudxr_eula=true \
+  --teleop.video_channel=/tmp/g1-cli-camera \
+  --robot.video_channel=/tmp/g1-cli-camera
+```
+
+Connect the headset through the Isaac Teleop client. In the command terminal,
+`r` + Enter starts tracking, `p` + Enter pauses, `q` + Enter exits. Tracking loss
+pauses and requires another explicit start. Mapping remains Unitree-style:
+head-relative wrists without squeeze clutches, left stick translation, right
+stick yaw; controller stop buttons remain active. Hands are locked, not actuated.
+
+For a local MuJoCo window add `--robot.onscreen=true` with a working local display.
+Headless physics success does not establish X forwarding or headset compatibility.
+CloudXR is started only when configured with explicit EULA acceptance; otherwise
+an externally owned runtime is expected. Cleanup closes Robot before XR, then
+XR before an owned CloudXR runtime.
+
+## Physical Acceptance Remains Separate
+
+The existing [manual safety sequence](g1_vr_manual_test_plan) remains the acceptance
+gate: simulation, read-only hardware, camera/headset, bounded motion, combined
+motion. Its standalone commands are preserved checkpoint commands, not evidence
+that this new CLI path has passed physical acceptance.
+
+The Robot supports `mode=shadow|arms|walk|combined`, requires a reviewed contract
+and a new report path for hardware, and explicit `enable_motion=true` for motion.
+Walking additionally requires `enable_locomotion=true`. Physical camera frames
+come from the separate read-only producer; select
+`teleop.video_source=g1-29-physical-camera`, not a Robot simulation video channel.
+Do not run the whole-body `run_g1_server.py` alongside stock-owned arm control.
+
+Jetson support is **not verified**. The tested Isaac Teleop runtime is the x86
+configuration; Jetson runtime/version support must be resolved before PC2 live
+acceptance. Changing the CLI does not remove that dependency.

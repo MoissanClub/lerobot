@@ -12,12 +12,22 @@ from lerobot.teleoperators.config import TeleoperatorConfig
 class XRControllersConfig(TeleoperatorConfig):
     app_name: str = "LeRobot XR"
     full_input: bool = False
+    terminal_control: bool = False
+    replay_path: str | None = None
+    video_channel: str | None = None
+    video_source: str = "g1-29-simulation"
+    cloudxr_config: str | None = None
+    accept_cloudxr_eula: bool = False
     # OpenXR (right, up, backward) -> robot (forward, left, up).
     base_T_anchor: list[list[float]] = field(  # noqa: N815
         default_factory=lambda: [[0, 0, -1, 0], [-1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
     )
 
     def __post_init__(self):
+        if self.cloudxr_config and not self.accept_cloudxr_eula:
+            raise ValueError("Starting CloudXR requires explicit EULA acceptance")
+        if self.replay_path and (self.video_channel or self.cloudxr_config):
+            raise ValueError("Replay does not open a live headset session")
         transform = np.asarray(self.base_T_anchor, dtype=float)
         if (
             transform.shape != (4, 4)

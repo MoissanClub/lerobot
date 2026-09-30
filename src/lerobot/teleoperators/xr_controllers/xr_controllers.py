@@ -2,11 +2,16 @@
 # Licensed under the Apache License, Version 2.0. See LICENSE in the project root.
 """Dual controller reader adapted from the Isaac Teleop SO-101 example.
 
-CloudXR is externally owned: this device never installs or starts a runtime.
+CloudXR is externally owned unless explicitly configured for this session.
 SDK imports are delayed until connect; replay and configuration need no OpenXR.
 """
 
+import json
+import select
+import socket
+import sys
 import time
+from contextlib import ExitStack
 
 import numpy as np
 
@@ -167,18 +172,42 @@ class IsaacControllerSession:
             session.__exit__(None, None, None)
 
 
+class ReplaySession:
+    """Explicit offline input fixture; never advertises live device provenance."""
+
+    def __init__(self, config):
+        self.path = config.replay_path
+        self.stream = None
+
+    def connect(self):
+        self.stream = open(self.path)  # noqa: SIM115 - owned until disconnect
+
+    def read(self):
+        line = self.stream.readline()
+        action = json.loads(line) if line else {"control.quit": True}
+        action["captured_at"] = time.monotonic()
+        return action
+
+    def close(self):
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+
+
 class XRControllers(Teleoperator):
     config_class = XRControllersConfig
     name = "xr_controllers"
 
     def __init__(self, config, *, session_factory=IsaacControllerSession):
         self._backend = None
+        self._cleanup = None
         super().__init__(config)
         self.config, self._factory = config, session_factory
 
     @property
     def action_features(self):
-        features = {"captured_at": float}
+        features = {"captured_at": float, "input.live": bool}
+        features.update({f"control.{key}": bool for key in ("start", "pause", "quit")})
         for side in ("left", "right"):
             features.update(
                 {
@@ -236,18 +265,59 @@ class XRControllers(Teleoperator):
     def connect(self, calibrate=True):
         if self.is_connected:
             raise RuntimeError("Already connected")
-        backend = self._factory(self.config)
+        cleanup = ExitStack()
         try:
-            backend.connect()
+            if self.config.cloudxr_config:
+                from isaacteleop.cloudxr import CloudXRLauncher
+
+                for port in (48322, 49100):
+                    with socket.socket() as probe:
+                        probe.settimeout(0.3)
+                        if probe.connect_ex(("127.0.0.1", port)) == 0:
+                            raise RuntimeError(f"CloudXR port {port} already in use")
+                cleanup.enter_context(
+                    CloudXRLauncher(
+                        env_config=self.config.cloudxr_config, accept_eula=self.config.accept_cloudxr_eula
+                    )
+                )
+            self._connect_backend(cleanup)
         except BaseException:
-            backend.close()
+            cleanup.close()
             raise
+        self._cleanup = cleanup
+
+    def _connect_backend(self, cleanup):
+        if self.config.replay_path:
+            backend = ReplaySession(self.config)
+        elif self.config.video_channel:
+            from .camera_display import VideoConfig
+            from .video_session import VideoControllerSession
+
+            backend = VideoControllerSession(
+                self.config,
+                VideoConfig(channel=self.config.video_channel, expected_source=self.config.video_source),
+            )
+        else:
+            backend = self._factory(self.config)
+        cleanup.callback(backend.close)
+        backend.connect()
         self._backend = backend
 
     def get_action(self):
         if not self.is_connected:
             raise RuntimeError("Not connected")
-        return self._backend.read()
+        action = dict(self._backend.read())
+        action["input.live"] = not bool(self.config.replay_path)
+        for key in ("start", "pause", "quit"):
+            action.setdefault(f"control.{key}", False)
+        if self.config.terminal_control and select.select([sys.stdin], [], [], 0)[0]:
+            line = sys.stdin.readline()
+            command = {"r": "start", "p": "pause", "q": "quit"}.get(line.strip())
+            if not line:
+                command = "quit"
+            if command:
+                action[f"control.{command}"] = True
+        return action
 
     def send_feedback(self, feedback):
         if not self.is_connected:
@@ -256,6 +326,7 @@ class XRControllers(Teleoperator):
             raise NotImplementedError("XR haptics are not implemented")
 
     def disconnect(self):
-        backend, self._backend = self._backend, None
-        if backend is not None:
-            backend.close()
+        self._backend = None
+        cleanup, self._cleanup = self._cleanup, None
+        if cleanup is not None:
+            cleanup.close()

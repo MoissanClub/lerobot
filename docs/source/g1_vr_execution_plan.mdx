@@ -7,7 +7,13 @@ review burden, duplicate solvers and long-lived fork maintenance.
 
 ## Source and Branch Boundaries
 
-- New work branch: `work/g1-29-vr-teleop`, starting at `g1/bugfixes`
+Update: active standard-CLI work is `work/g1-vr-teleoperate`, based on preserved
+checkpoint `work/g1-29-vr-teleop` at `2b9998b55`. See
+[standard CLI architecture and commands](g1_vr_standard_cli). Generic pipeline
+configuration and cleanup are isolated on `work/teleoperate-processors`, directly
+above bugfix checkpoint `321180e74`. Shared PR heads remain unchanged.
+
+- Preserved standalone branch: `work/g1-29-vr-teleop`, starting at `g1/bugfixes`
   `321180e74f0dc567b8ab8795a0a1f07d57ee668d`.
 - Local checkout: `/home/dwei/lerobot-sim/g1-vr-teleop`.
 - Previous candidate: `work/g1-29-arm-hardware`, checkpoint `39e02d7d2`, at

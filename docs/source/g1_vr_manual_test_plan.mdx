@@ -1,5 +1,11 @@
 # G1-29 VR: Manual Validation
 
+Standard-CLI migration: use [the new commands](g1_vr_standard_cli) on
+`work/g1-vr-teleoperate` for simulation. Commands below preserve the standalone
+checkpoint and physical acceptance gates; the new CLI has not passed hardware
+or headset acceptance. Jetson runtime support remains unverified: do not assume
+that the x86 Isaac Teleop environment runs unchanged on onboard PC2.
+
 Branch: `work/g1-29-vr-teleop` in `MoissanClub/lerobot`, based on `g1/bugfixes`
 `321180e74`. This is a supervised-validation candidate, not a hardware-approved
 release. No physical commands or headset acceptance were performed during
