@@ -71,7 +71,9 @@ lerobot-teleoperate \
 
 import logging
 import time
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from pprint import pformat
 
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
@@ -84,6 +86,7 @@ from lerobot.processor import (
     RobotProcessorPipeline,
     make_default_processors,
 )
+from lerobot.processor.converters import robot_action_observation_to_transition, transition_to_robot_action
 from lerobot.robots import (  # noqa: F401
     Robot,
     RobotConfig,
@@ -150,6 +153,8 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
+    # Optional local saved pipeline; omitted preserves identity processing.
+    teleop_action_processor_path: str | None = None
 
 
 def teleop_loop(
@@ -267,29 +272,41 @@ def teleoperate(cfg: TeleoperateConfig):
     robot = make_robot_from_config(cfg.robot)
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
-    teleop.connect()
-    robot.connect()
+    if cfg.teleop_action_processor_path is not None:
+        processor_path = Path(cfg.teleop_action_processor_path)
+        if not processor_path.is_file():
+            raise ValueError("teleop_action_processor_path must be a local processor JSON file")
+        teleop_action_processor = RobotProcessorPipeline.from_pretrained(
+            processor_path,
+            config_filename=processor_path.name,
+            local_files_only=True,
+            to_transition=robot_action_observation_to_transition,
+            to_output=transition_to_robot_action,
+        )
 
     try:
-        teleop_loop(
-            teleop=teleop,
-            robot=robot,
-            fps=cfg.fps,
-            display_data=cfg.display_data,
-            display_mode=cfg.display_mode,
-            duration=cfg.teleop_time_s,
-            teleop_action_processor=teleop_action_processor,
-            robot_action_processor=robot_action_processor,
-            robot_observation_processor=robot_observation_processor,
-            display_compressed_images=display_compressed_images,
-        )
+        with ExitStack() as cleanup:
+            teleop.connect()
+            cleanup.callback(teleop.disconnect)
+            robot.connect()
+            cleanup.callback(robot.disconnect)
+            teleop_loop(
+                teleop=teleop,
+                robot=robot,
+                fps=cfg.fps,
+                display_data=cfg.display_data,
+                display_mode=cfg.display_mode,
+                duration=cfg.teleop_time_s,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                robot_observation_processor=robot_observation_processor,
+                display_compressed_images=display_compressed_images,
+            )
     except KeyboardInterrupt:
         pass
     finally:
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
-        teleop.disconnect()
-        robot.disconnect()
 
 
 def main():
