@@ -21,6 +21,7 @@ from lerobot.cameras import CameraConfig
 from lerobot.envs.configs import G1EndEffector, UnitreeG1MujocoEnv
 
 from ..config import RobotConfig
+from .g1_arm_sdk import G1ArmSDKConfig
 from .g1_embodiments import get_g1_embodiment
 from .g1_utils import NUM_MOTORS
 from .hand_system import HandConfig
@@ -111,9 +112,23 @@ class UnitreeG1Config(RobotConfig):
     # Explicit opt-in: local supported-arm physics, no DDS/SDK or asset download.
     simulation_urdf: str | None = None
     simulation_mesh_dir: str | None = None
+    arm_sdk: G1ArmSDKConfig | None = None
 
     def __post_init__(self):
         super().__post_init__()
+        if self.arm_sdk is not None and (
+            self.is_simulation
+            or self.embodiment != "g1_29"
+            or self.controller is not None
+            or self.hands
+            or self.cameras
+            or self.simulation_urdf is not None
+            or self.gravity_compensation
+        ):
+            raise ValueError(
+                "Arm SDK requires physical G1-29, no controller/hands/cameras/native sim; "
+                "configure gravity through arm_sdk.gravity_urdf"
+            )
         for side, hand in self.hands.items():
             if side not in ("left", "right") or hand.side != side:
                 raise ValueError("Hand dictionary key must match configured left/right side")

@@ -164,6 +164,7 @@ class UnitreeG1(Robot):
         self.config = config
         self.hands = HandCollection(config.hands)
         self._native = None
+        self._arm_sdk = None
         self.embodiment = get_g1_embodiment(config.embodiment)
         self.joint_index = self.embodiment.joint_index
         self.arm_index = self.embodiment.arm_index
@@ -173,7 +174,7 @@ class UnitreeG1(Robot):
         self._cameras = make_cameras_from_configs(config.cameras)
 
         # Import channel classes based on mode
-        if config.is_simulation:
+        if config.is_simulation or config.arm_sdk is not None:
             self._ChannelFactoryInitialize = _SDKChannelFactoryInitialize
             self._ChannelPublisher = _SDKChannelPublisher
             self._ChannelSubscriber = _SDKChannelSubscriber
@@ -261,6 +262,8 @@ class UnitreeG1(Robot):
         kd: np.ndarray | list[float] | None = None,
         tau: np.ndarray | list[float] | None = None,
     ) -> None:  # writes robot command whenever requested
+        if self.config.arm_sdk is not None:
+            raise RuntimeError("Whole-body publishing is forbidden in arm SDK mode")
         with self._lowcmd_lock:
             for motor in self.joint_index:
                 key = f"{motor.name}.q"
@@ -315,6 +318,8 @@ class UnitreeG1(Robot):
 
     @cached_property
     def _body_action_features(self) -> dict[str, type]:
+        if self.config.arm_sdk is not None:
+            return {f"{motor.name}.q": float for motor in self.arm_index}
         # No controller configured: joint targets for the selected embodiment.
         if self.controller is None:
             return {f"{motor.name}.q": float for motor in self.joint_index}
@@ -399,6 +404,14 @@ class UnitreeG1(Robot):
             exc.add_note(f"Cleanup also failed: {cleanup}")
 
     def _connect_body(self, calibrate: bool = True) -> None:  # connect to DDS
+        if self.config.arm_sdk is not None:
+            if self._arm_sdk is not None:
+                raise RuntimeError("Use a new robot instance/process after an Arm SDK session")
+            from .g1_arm_sdk import G1ArmSDK
+
+            self._arm_sdk = G1ArmSDK(self.config.arm_sdk)
+            self._arm_sdk.connect()
+            return
         if self.config.simulation_urdf is not None:
             if self._native is not None:
                 raise RuntimeError("Already connected")
@@ -510,6 +523,10 @@ class UnitreeG1(Robot):
             raise ExceptionGroup("G1 disconnect failed", errors)
 
     def _disconnect_body(self):
+        if self.config.arm_sdk is not None:
+            if self._arm_sdk is not None:
+                self._arm_sdk.close()
+            return
         if self.config.simulation_urdf is not None:
             if self._native is not None:
                 self._native.close()
@@ -573,6 +590,10 @@ class UnitreeG1(Robot):
             raise
 
     def _get_body_observation(self) -> RobotObservation:
+        if self.config.arm_sdk is not None:
+            if self._arm_sdk is None:
+                raise RuntimeError("Arm SDK is not connected")
+            return self._arm_sdk.observation()
         if self.config.simulation_urdf is not None:
             return {} if self._native is None else self._native.observation()
         with self._lowstate_lock:
@@ -650,6 +671,10 @@ class UnitreeG1(Robot):
             raise
 
     def _send_body_action(self, action: RobotAction) -> RobotAction:
+        if self.config.arm_sdk is not None:
+            if self._arm_sdk is None:
+                raise RuntimeError("Arm SDK is not connected")
+            return self._arm_sdk.send(action)
         if self.config.simulation_urdf is not None:
             if self._native is None:
                 raise RuntimeError("Not connected")
@@ -710,6 +735,8 @@ class UnitreeG1(Robot):
 
     @property
     def _body_is_connected(self) -> bool:
+        if self.config.arm_sdk is not None:
+            return self._arm_sdk is not None and self._arm_sdk.connected
         if self.config.simulation_urdf is not None:
             return self._native is not None
         with self._lowstate_lock:
@@ -723,6 +750,12 @@ class UnitreeG1(Robot):
     @property
     def cameras(self) -> dict:
         return self._cameras
+
+    def activate_arm_control(self) -> None:
+        """Explicit physical arm-authority acquisition; connect alone is passive."""
+        if self._arm_sdk is None:
+            raise RuntimeError("Connect the explicit arm SDK backend first")
+        self._arm_sdk.activate()
 
     def step_simulation(self) -> None:
         """Advance one native control period while holding the last targets."""
@@ -740,6 +773,8 @@ class UnitreeG1(Robot):
         control_dt: float | None = None,
         default_positions: list[float] | None = None,
     ) -> None:  # move robot to default position
+        if self.config.arm_sdk is not None:
+            raise RuntimeError("Automatic reset is forbidden for arm-only hardware")
         if self.config.simulation_urdf is not None:
             if self._native is None:
                 raise RuntimeError("Not connected")

@@ -1,0 +1,190 @@
+# G1-29 Arm-Only Validation Candidate
+
+This is a supervised-validation candidate, not hardware acceptance. No physical
+motion was performed during implementation. Scope: G1-29's 14 arm joints, no hand
+driver, no walking commands, no SONIC. The legs and waist must remain under an
+externally verified stock controller. Attached hands still affect mass and geometry.
+
+Development branch: `work/g1-29-arm-hardware`, starting at
+`d89a1d0b5f628045cc73293bcdfa2dc6c0808549` from `dev/g1-integration`.
+Keep simulation release and BrainCo work separate. Do not switch a checkout used
+by a running process or run the old whole-body server alongside this backend.
+
+## Protocol and Limitations
+
+Reference: Unitree SDK Python commit
+[`814556d15970dd2ecf1c9984e845ca02ab07e206`](https://github.com/unitreerobotics/unitree_sdk2_python/blob/814556d15970dd2ecf1c9984e845ca02ab07e206/example/g1/high_level/g1_arm7_sdk_dds_example.py).
+Its seven-joint-arm example publishes HG LowCmd on `rt/arm_sdk`, subscribes to
+`rt/lowstate`, uses motor slots 15-28 for arms and slot 29.q for blending weight.
+The official example also commands waist joints; this candidate does not. Confirm
+that zero/uncommanded waist fields preserve the stock owner on the actual firmware
+before enabling this implementation. Slot 29 is not a physical motor.
+
+The candidate never publishes `rt/lowcmd` and never invokes MotionSwitcher or
+ReleaseMode. Do not run `run_g1_server.py` for this diagnostic: that is a different
+whole-body authority path. The robot's mode-machine byte alone does not identify
+its high-level control mode or prove firmware compatibility.
+
+`connect()` subscribes only. Explicit activation creates the sole arm publisher,
+sends a weight-zero packet while waiting for DDS matching, takes a fresh measured
+pose, then blends weight toward one. A matched reader is not an execution ACK.
+The arms are all held; only the selected diagnostic joint gets a changing target.
+`reset()` and direct whole-body publishing are prohibited in arm SDK mode.
+
+On normal close or a software fault, the worker attempts three weight-zero packets
+and ends the session. This requests release to stock control; it does not prove a
+physical stop. Normal joint tests return their requested target to the starting
+pose before release. Faults do not perform an automatic return trajectory.
+The local publisher lock prevents this backend from starting twice on one host;
+it cannot detect another publisher on a different host or another application.
+
+The robot-side thread watchdog covers missed caller updates, stale feedback and
+scheduling delays. It cannot act after process death, host failure, lost DDS, or a
+blocked native SDK call. Firmware packet-loss behavior and an independent operator
+stop/support arrangement must be reviewed. No claim of hard real-time operation,
+collision avoidance, torque sensor calibration or safety certification is made.
+
+Gravity feedforward, when configured, uses measured arm pose in the existing
+reduced G1 model. This requires near-neutral waist and upright torso; checks reject
+excessive waist angles or tilt. It does not add an unmodeled payload. The template
+enables it, but gains, model mass, feedforward and estimated torque bounds all need
+operator review. PD torque estimates are not a hardware torque limiter.
+
+## Environment and Offline Preparation
+
+Use the matching LeRobot checkout and Python with its G1 dependencies. Motion with
+gravity also needs the existing conda-forge Pinocchio installation; MuJoCo is needed
+only for simulation tests. No BrainCo SDK, policy weights, GPU inference, CloudXR,
+or camera is required. Nothing in template generation contacts the robot.
+
+On the current development host:
+
+```bash
+cd /home/dwei/lerobot-sim/g1-arm-hardware
+source /home/dwei/lerobot-dev/environment/activate.sh
+export PYTHONPATH="$PWD/src"
+export PYTHONNOUSERSITE=1
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+export MUJOCO_GL=egl
+PYTHON=/home/dwei/miniforge3/envs/lerobot-dev/bin/python
+URDF=/home/dwei/lerobot-dev/assets/ff42b91dc881922e010c/g1_29.urdf
+
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --urdf "$URDF" --write-template arm-contract.json
+```
+
+Template generation refuses to overwrite a file. The resulting gains and motion
+limits are examples, not hardware-approved values. Initial scalar gains follow
+the SDK example, while model bounds and effort ceilings come from the supplied
+URDF. The JSON records the model hash; edit the contract deliberately and do not
+change the model after review. All review flags initially remain false.
+
+Offline syntax/envelope validation:
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend dry-run --phase joint --contract arm-contract.json --urdf "$URDF" \
+  --joint kLeftElbow.q --delta-rad 0.02 --output dry-run-001.json
+```
+
+Physics-in-loop check (the displacement below is a simulation example):
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend simulation --phase joint --contract arm-contract.json --urdf "$URDF" \
+  --joint kLeftElbow.q --delta-rad 0.02 --output sim-left-001.json
+```
+
+Repeat with `kRightElbow.q` and a new output filename. `--phase hold` commands no
+relative displacement. `--phase read-only` creates no writer. Simulation uses the
+real backend state machine and message builder with MuJoCo feedback and a fake
+transport; its stock-hold/blend model is not Unitree firmware emulation.
+
+## Supervised Hardware Sequence
+
+Run on the robot-side host connected to the verified DDS interface, with no competing
+arm publisher. Install/pin this source and dependencies there; the absolute paths
+above are workstation examples, not assumed robot paths. Preserve source/model hashes.
+Do not run an unreviewed hardware configuration remotely on a laptop and treat its
+thread watchdog as a robot-side safety mechanism.
+
+1. Edit `arm_sdk.network_interface` in the contract. Check physical robot identity,
+   firmware, body variant and source/model pins. Leave motion review flags false.
+2. Start with a passive read-only run. It does not switch modes or create a command
+   publisher. Inspect the reported mode bytes, joint positions, freshness and ticks;
+   do not interpret a pass as approval to acquire control.
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend hardware --phase read-only --contract arm-contract.json \
+  --output hardware-readonly-001.json
+```
+
+3. Review the contract with the responsible operator: manufacturer's supported mode,
+   external support/balance owner, exclusive publisher, waist behavior, physical
+   stop procedure, packet loss/process death, payload/model, gains and limits.
+   Set expected mode from verified feedback. Fill identity/procedure fields and
+   approve flags only after their external checks; do not mechanically flip them
+   to bypass the gate. Mode bytes alone are insufficient evidence.
+4. Only after review, run a no-displacement authority acquisition. This applies
+   torque and can move the robot even though its target starts at measured pose.
+   Observe both arms, waist and legs and the actual release to stock control.
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend hardware --phase hold --enable-motion \
+  --contract arm-contract.json --urdf "$URDF" --output hardware-hold-001.json
+```
+
+5. After the hold/handover result is reviewed, select a joint and a small signed
+   displacement approved for the actual setup. Define `REVIEWED_DELTA_RAD` and
+   `REVIEWED_DURATION_S` explicitly; no physical displacement is preapproved here.
+
+```bash
+"$PYTHON" examples/unitree_g1/validate_arm_sdk.py \
+  --backend hardware --phase joint --enable-motion \
+  --contract arm-contract.json --urdf "$URDF" --joint kLeftElbow.q \
+  --delta-rad "$REVIEWED_DELTA_RAD" --duration-s "$REVIEWED_DURATION_S" \
+  --output hardware-left-001.json
+```
+
+Stop on any discrepancy. Inspect observed joint identity/direction, unchanged
+lower-body control, all arm feedback, and physical handover. Repeat on the other
+arm only after reviewing the first result. Ctrl+C/SIGTERM requests software release;
+the independent physical stop procedure remains necessary.
+
+## Results and Next Gate
+
+Local regression on 2026-09-29: **251 passed, 1 skipped**. The skip is the
+optional installed BrainCo SDK audit, outside this arm-only scope. MuJoCo
+read-only, hold, left-elbow and right-elbow diagnostics passed, as did existing
+kinematics and dual-arm XR regressions. These results provide no physical
+acceptance evidence. The local report is
+`/home/dwei/lerobot-sim/g1-arm-regression-final.xml`.
+
+Reports are created exclusively, initially marked incomplete, then finalized with
+command/measured traces, feedback timing, mode/tick data, source/model/config hashes,
+errors and whether release packets were sent. A failed/cancelled/unfinished run is
+not a pass. Exit 0 means software criteria only; `hardware_acceptance` remains
+`pending_operator_review` and `physical_stop_verified` is false.
+
+Hardware activation is never inferred from a simulation pass. This candidate stops
+at the first bounded joint tests; scripted physical IK, live physical XR, camera
+delivery, broader motion envelopes and collision handling remain subsequent gates.
+Existing XR simulation now gets measured arm positions through the public robot
+observation API, but its launcher remains simulation-only.
+
+Regression commands (no physical connection):
+
+```bash
+export G1_KINEMATICS_ASSETS="$(dirname "$URDF")"
+export G1_INTEGRATION_TESTS=1
+"$PYTHON" -m pytest -q \
+  tests/robots/test_unitree_g1_arm_sdk.py \
+  tests/integration/test_unitree_g1_arm_validation.py \
+  tests/integration/test_unitree_g1_xr_mujoco.py
+```
+
+The ordinary arm SDK tests use fake transport, SDK serialization and mocked SDK
+channel construction. They never initialize a physical DDS participant. The real
+physics tests require the explicit asset/test environment variables above.

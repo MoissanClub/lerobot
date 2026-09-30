@@ -45,7 +45,6 @@ def main():
     writer, reader = None, None
     try:
         robot.connect()
-        sim = robot._native
         ik = G1ArmKinematics(G1CartesianConfig(args.embodiment, args.assets / f"{args.embodiment}.urdf"))
         q = np.zeros(ik.size)
         q[[0, ik.size // 2]] = -0.4
@@ -64,7 +63,12 @@ def main():
                 )
             reader = XRControllers(XRControllersConfig(), **options)
             reader.connect()
-        initial = sim.data.qpos[sim.qadr].copy()
+
+        def measured_arms():
+            observation = robot.get_observation()
+            return np.array([observation[f"{j.name}.q"] for j in robot.arm_index])
+
+        initial = measured_arms()
         largest_motion = 0.0
         step = 0
         while args.steps == 0 or step < args.steps:
@@ -83,10 +87,10 @@ def main():
                     )
             else:
                 sample = reader.get_action()
-            robot.send_action(control.action(sample, sim.data.qpos[sim.qadr].copy()))
+            robot.send_action(control.action(sample, measured_arms()))
             for _ in range(4):
                 robot.step_simulation()
-            largest_motion = max(largest_motion, float(np.max(abs(sim.data.qpos[sim.qadr] - initial))))
+            largest_motion = max(largest_motion, float(np.max(abs(measured_arms() - initial))))
             if step % 2 == 0:
                 captured = time.monotonic_ns()
                 writer.publish(
