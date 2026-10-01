@@ -16,6 +16,7 @@ class XRControllersConfig(TeleoperatorConfig):
     replay_path: str | None = None
     video_channel: str | None = None
     video_source: str = "g1-29-simulation"
+    video_openxr_composition: bool = True
     cloudxr_config: str | None = None
     accept_cloudxr_eula: bool = False
     # OpenXR (right, up, backward) -> robot (forward, left, up).

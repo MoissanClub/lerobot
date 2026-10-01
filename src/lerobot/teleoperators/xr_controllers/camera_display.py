@@ -20,6 +20,7 @@ class VideoConfig:
     distance_m: float = 1.5
     screen_width_m: float = 1.8
     expected_source: str | None = None
+    openxr_composition: bool = True
 
     def __post_init__(self):
         validate_dimensions(self.width, self.height)
@@ -63,6 +64,9 @@ class CameraDisplay:
             layer_config.resolution = viz.Resolution(config.width, config.height)
             layer_config.format = viz.PixelFormat.kRGBA8
             layer_config.stereo = False
+            if not config.openxr_composition:
+                # Native quads can be black on runtimes that require compositor rendering.
+                layer_config.openxr_composition = False
             if not offscreen:
                 layer_config.placement = viz.QuadLayerPlacement(
                     viz.Pose3D((0.0, 1.4, -config.distance_m), (1.0, 0.0, 0.0, 0.0)),

@@ -61,6 +61,11 @@ head-relative wrists without squeeze clutches, left stick translation, right
 stick yaw; controller stop buttons remain active. Hands are locked, not actuated.
 
 For a local MuJoCo window add `--robot.onscreen=true` with a working local display.
+On Jetson Orin with Isaac Teleop 1.4.145, add
+`--teleop.video_openxr_composition=false` when using headset video. Native OpenXR
+quad composition can show a black panel on this runtime; this option asks Televiz
+to render the panel into its shared render target instead. Platform detection and
+the EGL preload belong in the PC2 launcher, not the generic XR teleoperator.
 Headless physics success does not establish X forwarding or headset compatibility.
 CloudXR is started only when configured with explicit EULA acceptance; otherwise
 an externally owned runtime is expected. Cleanup closes Robot before XR, then

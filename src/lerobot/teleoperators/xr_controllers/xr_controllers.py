@@ -295,7 +295,11 @@ class XRControllers(Teleoperator):
 
             backend = VideoControllerSession(
                 self.config,
-                VideoConfig(channel=self.config.video_channel, expected_source=self.config.video_source),
+                VideoConfig(
+                    channel=self.config.video_channel,
+                    expected_source=self.config.video_source,
+                    openxr_composition=self.config.video_openxr_composition,
+                ),
             )
         else:
             backend = self._factory(self.config)

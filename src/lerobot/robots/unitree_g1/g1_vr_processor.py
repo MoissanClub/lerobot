@@ -66,7 +66,15 @@ class G1VRActionProcessor(RobotActionProcessorStep):
             if action["captured_at"] < self.last_stamp:
                 raise ValueError("XR timestamp regressed")
             self.last_stamp = action["captured_at"]
-        except (KeyError, ValueError, TypeError):
+        except (KeyError, ValueError, TypeError) as exc:
+            if action.get("control.start", False) or self.enabled:
+                logging.warning(
+                    "XR tracking paused: %s (head=%s, left=%s, right=%s)",
+                    exc,
+                    action.get("head.tracked", False),
+                    action.get("left.tracked", False),
+                    action.get("right.tracked", False),
+                )
             self.enabled = False
             self.held = measured.copy()
         velocity = np.zeros(3)
