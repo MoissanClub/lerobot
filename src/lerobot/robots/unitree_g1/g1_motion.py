@@ -8,6 +8,7 @@ No XR device code, IK action mapping, or teleoperation loop belongs here.
 
 import json
 import logging
+import tempfile
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
@@ -22,10 +23,11 @@ from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots.config import RobotConfig
 from lerobot.robots.robot import Robot
 
-from .g1_arm_sdk import G1ArmSDK
+from .g1_arm_sdk import G1ArmSDK, G1ArmSDKConfig
 from .g1_base_motion import G1BaseMotion
-from .g1_safety_contract import digest, validate_contract
+from .g1_safety_contract import digest, model_limits, validate_arm_model, validate_contract
 from .g1_utils import G1_29_JointIndex
+from .g1_vr_assets import resolve_g1_vr_assets
 from .g1_vr_control import ARM_KEYS, G1VRKinematics
 from .g1_vr_processor import CONTROL_KEYS
 
@@ -42,13 +44,16 @@ class UnitreeG1MotionConfig(RobotConfig):
     video_channel: str | None = None
     report_path: str | None = None
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
+    arm_sdk: G1ArmSDKConfig | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.mode not in ("camera", "simulation", "shadow", "arms", "walk", "combined"):
             raise ValueError("Unknown G1 motion mode")
-        if self.mode != "camera" and not self.assets:
-            raise ValueError("Simulation and hardware feedback/control require assets")
+        if self.contract and self.arm_sdk is not None:
+            raise ValueError("Use robot.arm_sdk or a legacy contract, not both")
+        if self.arm_sdk is not None and self.mode not in ("shadow", "arms"):
+            raise ValueError("Direct arm_sdk configuration supports shadow and arms modes")
         if self.mode == "camera":
             if len(self.cameras) != 1 or not self.video_channel or self.onscreen:
                 raise ValueError(
@@ -64,8 +69,15 @@ class UnitreeG1MotionConfig(RobotConfig):
             raise ValueError("Only physical motion modes require enable_motion=true")
         if self.enable_locomotion != (self.mode in ("walk", "combined")):
             raise ValueError("Only walk/combined require enable_locomotion=true")
-        if self.mode not in ("simulation", "camera") and (not self.contract or not self.report_path):
-            raise ValueError("Physical feedback/control requires contract and report_path")
+        if self.mode not in ("simulation", "camera") and not self.contract and self.arm_sdk is None:
+            raise ValueError("Physical feedback/control requires robot.arm_sdk or a legacy contract")
+        if self.mode == "arms" and self.arm_sdk is not None:
+            if self.arm_sdk.expected_mode_machine is None:
+                raise ValueError("Arm motion requires an explicit arm_sdk.expected_mode_machine")
+            for name in ("kp", "kd", "torque_limits"):
+                values = getattr(self.arm_sdk, name)
+                if len(values) != 14 or not np.isfinite(values).all() or min(values) <= 0:
+                    raise ValueError(f"Arm motion requires 14 explicit positive arm_sdk.{name} values")
         if self.mode not in ("simulation", "camera") and (self.onscreen or self.video_channel):
             raise ValueError("Physical video uses a separate camera producer, not Robot rendering")
 
@@ -123,6 +135,9 @@ class UnitreeG1Motion(Robot):
         self._used = True
         self._stack = ExitStack()
         try:
+            if self.config.mode != "camera" and self.config.report_path is None:
+                self.config.report_path = str(Path(tempfile.mkdtemp(prefix="lerobot-g1-")) / "report.jsonl")
+                logging.info("G1 session report: %s", self.config.report_path)
             if self.config.report_path:
                 self.report = self._stack.enter_context(Path(self.config.report_path).open("x"))  # noqa: SIM115
             self._record(
@@ -144,7 +159,7 @@ class UnitreeG1Motion(Robot):
                 self._connected = True
                 self._record(event="ready", mode="camera", motor_publication=False, base_rpc=False)
                 return
-            assets = Path(self.config.assets)
+            assets = Path(resolve_g1_vr_assets(self.config.assets))
             self.gravity = G1VRKinematics(assets)
             if self.config.mode == "simulation":
                 from .g1_vr_simulation import G1VRSimulation
@@ -160,12 +175,15 @@ class UnitreeG1Motion(Robot):
                     self.writer = FrameWriter(self.config.video_channel, 640, 480)
                     self._stack.callback(self.writer.close)
             else:
-                doc = json.loads(Path(self.config.contract).read_text())
-                self.arm_config = validate_contract(
-                    doc, assets / "assets/g1_body29_hand14.urdf", self.config.enable_motion
-                )
-                if self.config.enable_motion and doc.get("vr_pose_mapping_reviewed") is not True:
-                    raise ValueError("Physical VR mapping must be reviewed")
+                urdf = assets / "assets/g1_body29_hand14.urdf"
+                if self.config.arm_sdk is not None:
+                    self.arm_config = self._direct_arm_config(urdf)
+                    doc = {}
+                else:
+                    doc = json.loads(Path(self.config.contract).read_text())
+                    self.arm_config = validate_contract(doc, urdf, self.config.enable_motion)
+                    if self.config.enable_motion and doc.get("vr_pose_mapping_reviewed") is not True:
+                        raise ValueError("Physical VR mapping must be reviewed")
                 if self.config.enable_locomotion:
                     for flag in ("locomotion_reviewed", "damping_reviewed", "combined_ownership_reviewed"):
                         if doc.get(flag) is not True:
@@ -177,6 +195,7 @@ class UnitreeG1Motion(Robot):
                 )
                 self._stack.callback(self.arm.close)
                 self.arm.connect()
+                logging.info("G1 hardware mode (mode_machine, mode_pr): %s", self.arm.mode)
                 if self.config.enable_locomotion:
                     self.base = G1BaseMotion(
                         self._base_feedback, domain_id=self.arm_config.domain_id, **doc["base_limits"]
@@ -187,6 +206,23 @@ class UnitreeG1Motion(Robot):
         except BaseException:
             self.disconnect()
             raise
+
+    def _direct_arm_config(self, urdf: Path) -> G1ArmSDKConfig:
+        cfg = self.config.arm_sdk
+        if cfg is None:
+            raise ValueError("Missing robot.arm_sdk configuration")
+        if self.config.mode == "shadow":
+            return replace(cfg, read_only=True)
+        limits = model_limits(urdf)
+        cfg = replace(
+            cfg,
+            read_only=False,
+            lower=cfg.lower or limits["lower"],
+            upper=cfg.upper or limits["upper"],
+            gravity_urdf=cfg.gravity_urdf or str(urdf),
+        )
+        validate_arm_model(cfg, urdf)
+        return cfg
 
     def _base_feedback(self) -> dict:
         obs = self.arm.observation()

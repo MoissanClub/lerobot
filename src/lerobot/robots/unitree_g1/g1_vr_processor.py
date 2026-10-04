@@ -5,14 +5,21 @@
 import logging
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from lerobot.configs import FeatureType, PipelineFeatureType, PolicyFeature
 from lerobot.lerobot_types import TransitionKey
-from lerobot.processor.pipeline import ProcessorStepRegistry, RobotActionProcessorStep
+from lerobot.processor.converters import robot_action_observation_to_transition, transition_to_robot_action
+from lerobot.processor.pipeline import ProcessorStepRegistry, RobotActionProcessorStep, RobotProcessorPipeline
 
+from .g1_vr_assets import resolve_g1_vr_assets
 from .g1_vr_control import ARM_KEYS, G1VRKinematics, map_input, stop_buttons
+
+if TYPE_CHECKING:
+    from lerobot.robots.config import RobotConfig
+    from lerobot.teleoperators.config import TeleoperatorConfig
 
 CONTROL_KEYS = (
     "base.vx",
@@ -24,6 +31,27 @@ CONTROL_KEYS = (
     "control.damp",
     "control.created_at",
 )
+
+
+def make_g1_vr_action_processor(
+    robot_config: "RobotConfig | None", teleop_config: "TeleoperatorConfig | None"
+) -> RobotProcessorPipeline:
+    """Select the G1 pose processor for the configured Robot/Teleoperator pair."""
+    from lerobot.teleoperators.xr_controllers.config_xr_controllers import XRControllersConfig
+
+    from .g1_motion import UnitreeG1MotionConfig
+
+    if not isinstance(robot_config, UnitreeG1MotionConfig):
+        raise ValueError("G1 VR requires unitree_g1_motion")
+    if not isinstance(teleop_config, XRControllersConfig) or not teleop_config.full_input:
+        raise ValueError("G1 VR requires teleop.type=xr_controllers and teleop.full_input=true")
+    if not np.allclose(teleop_config.base_T_anchor, np.eye(4)):
+        raise ValueError("G1 VR requires untransformed OpenXR poses (identity base_T_anchor)")
+    return RobotProcessorPipeline(
+        steps=[G1VRActionProcessor(resolve_g1_vr_assets(robot_config.assets))],
+        to_transition=robot_action_observation_to_transition,
+        to_output=transition_to_robot_action,
+    )
 
 
 @ProcessorStepRegistry.register("g1_vr_action")

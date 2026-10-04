@@ -76,6 +76,17 @@ def contract_template(urdf):
     }
 
 
+def validate_arm_model(cfg: G1ArmSDKConfig, urdf: Path) -> None:
+    """Check configured bounds and gravity model against the selected robot model."""
+    limits = model_limits(urdf)
+    if np.any(np.asarray(cfg.lower) < limits["lower"]) or np.any(np.asarray(cfg.upper) > limits["upper"]):
+        raise ValueError("Configured joint bounds exceed model bounds")
+    if np.any(np.asarray(cfg.torque_limits) > limits["effort"]):
+        raise ValueError("Configured torque bounds exceed model effort limits")
+    if cfg.gravity_urdf and Path(cfg.gravity_urdf).resolve() != urdf.resolve():
+        raise ValueError("Gravity model must be the reviewed URDF")
+
+
 def validate_contract(doc, urdf, hardware_motion):
     if doc.get("schema") != 1:
         raise ValueError("Unsupported contract schema")
@@ -83,13 +94,7 @@ def validate_contract(doc, urdf, hardware_motion):
     if urdf is not None:
         if doc.get("urdf_sha256") != digest(urdf):
             raise ValueError("URDF hash differs from reviewed contract")
-        limits = model_limits(urdf)
-        if np.any(np.asarray(cfg.lower) < limits["lower"]) or np.any(np.asarray(cfg.upper) > limits["upper"]):
-            raise ValueError("Contract joint bounds exceed model bounds")
-        if np.any(np.asarray(cfg.torque_limits) > limits["effort"]):
-            raise ValueError("Contract torque bounds exceed model effort limits")
-        if cfg.gravity_urdf and Path(cfg.gravity_urdf).resolve() != urdf.resolve():
-            raise ValueError("Gravity model must be the reviewed URDF")
+        validate_arm_model(cfg, urdf)
     if hardware_motion:
         if urdf is None or cfg.read_only or cfg.expected_mode_machine is None:
             raise ValueError("Motion needs a reviewed URDF, expected mode and motion configuration")

@@ -1,6 +1,6 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # Licensed under the Apache License, Version 2.0. See LICENSE in the project root.
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -20,11 +20,16 @@ class XRControllersConfig(TeleoperatorConfig):
     cloudxr_config: str | None = None
     accept_cloudxr_eula: bool = False
     # OpenXR (right, up, backward) -> robot (forward, left, up).
-    base_T_anchor: list[list[float]] = field(  # noqa: N815
-        default_factory=lambda: [[0, 0, -1, 0], [-1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
-    )
+    base_T_anchor: list[list[float]] | None = None  # noqa: N815
 
     def __post_init__(self):
+        if self.base_T_anchor is None:
+            # Full input includes head/sticks for embodiment processors, which consume raw OpenXR poses.
+            self.base_T_anchor = (
+                np.eye(4).tolist()
+                if self.full_input
+                else [[0, 0, -1, 0], [-1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]
+            )
         if self.cloudxr_config and not self.accept_cloudxr_eula:
             raise ValueError("Starting CloudXR requires explicit EULA acceptance")
         if self.replay_path and (self.video_channel or self.cloudxr_config):

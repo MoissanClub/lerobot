@@ -16,7 +16,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -45,6 +45,10 @@ from .pipeline import (
 )
 from .relative_action_processor import AbsoluteActionsProcessorStep, RelativeActionsProcessorStep
 from .rename_processor import RenameObservationsProcessorStep
+
+if TYPE_CHECKING:
+    from lerobot.robots.config import RobotConfig
+    from lerobot.teleoperators.config import TeleoperatorConfig
 
 
 def make_default_teleop_action_processor() -> RobotProcessorPipeline[
@@ -78,8 +82,17 @@ def make_default_robot_observation_processor() -> RobotProcessorPipeline[RobotOb
     return robot_observation_processor
 
 
-def make_default_processors():
+def make_default_processors(
+    *, robot_config: "RobotConfig | None" = None, teleop_config: "TeleoperatorConfig | None" = None
+) -> tuple[RobotProcessorPipeline, RobotProcessorPipeline, RobotProcessorPipeline]:
     teleop_action_processor = make_default_teleop_action_processor()
+    if (
+        getattr(robot_config, "type", None) == "unitree_g1_motion"
+        and getattr(robot_config, "mode", None) != "camera"
+    ):
+        from lerobot.robots.unitree_g1.g1_vr_processor import make_g1_vr_action_processor
+
+        teleop_action_processor = make_g1_vr_action_processor(robot_config, teleop_config)
     robot_action_processor = make_default_robot_action_processor()
     robot_observation_processor = make_default_robot_observation_processor()
     return (teleop_action_processor, robot_action_processor, robot_observation_processor)

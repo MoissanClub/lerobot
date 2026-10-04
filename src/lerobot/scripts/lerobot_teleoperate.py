@@ -272,7 +272,10 @@ def teleoperate(cfg: TeleoperateConfig):
 
     teleop = make_teleoperator_from_config(cfg.teleop)
     robot = make_robot_from_config(cfg.robot)
-    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
+    teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors(
+        robot_config=cfg.robot if cfg.teleop_action_processor_path is None else None,
+        teleop_config=cfg.teleop if cfg.teleop_action_processor_path is None else None,
+    )
 
     if cfg.teleop_action_processor_path is not None:
         processor_path = Path(cfg.teleop_action_processor_path)

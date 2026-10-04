@@ -83,22 +83,22 @@ lerobot_environment
 cd "$lerobot_dir"
 ```
 
-Prepare the G1-29 assets and VR action processor in a fresh session directory:
+The pinned model downloads automatically on first use. Create a fresh directory
+for the camera channel:
 
 ```bash
 vr_run=$(mktemp -d /tmp/g1-vr-XXXXXXXX)
-uv run --no-project --python "$(command -v python)" \
-  examples/unitree_g1/prepare_vr_assets.py --config-dir "$vr_run"
 ```
 
 Review NVIDIA's CloudXR EULA before supplying the acceptance flag, then start:
 
 ```bash
 MUJOCO_GL=egl lerobot-teleoperate \
-  --config_path="$vr_run/teleoperate.json" \
   --robot.type=unitree_g1_motion \
   --robot.mode=simulation \
   --teleop.type=xr_controllers \
+  --teleop.full_input=true \
+  --teleop.terminal_control=true \
   --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
   --teleop.accept_cloudxr_eula=true \
   --teleop.video_channel="$vr_run/camera.rgb" \
@@ -317,73 +317,72 @@ scene, orientation, color, and responsiveness. Camera timeouts replace stale
 video with an unavailable placeholder. Type `q` then Enter to close the session
 before starting arm control. The composition option is for Orin.
 
-#### Prepare and Check Arm Control
+#### Check Feedback and VR Targets
 
-Prepare a fresh configuration with the VR action processor and create a contract:
-
-```bash
-arm_run=$(mktemp -d /tmp/g1-vr-arms-XXXXXXXX)
-uv run --no-project --python "$(command -v python)" \
-  examples/unitree_g1/prepare_vr_assets.py --config-dir "$arm_run"
-ASSETS=$(uv run --no-project --python "$(command -v python)" -c \
-  'import json,sys; print(json.load(open(sys.argv[1]))["robot"]["assets"])' \
-  "$arm_run/teleoperate.json")
-uv run --no-project --python "$(command -v python)" \
-  examples/unitree_g1/validate_arm_sdk.py \
-  --urdf "$ASSETS/assets/g1_body29_hand14.urdf" --write-template arm-contract.json
-```
-
-Create the contract once and retain it for subsequent sessions. Its defaults are
-examples, not approved gains or limits. Set `arm_sdk.network_interface` to the
-robot-facing interface. Review robot identity/mode, command ownership, payload,
-gains/limits, and stop/handover behavior before approving the contract fields.
-Use `validate_arm_sdk.py --help` for read-only feedback, supervised hold, and
-bounded joint checks; hold and joint checks apply torque. Provide an independent
-stop mechanism: a Python watchdog cannot act after process death.
-
-Preview real joint feedback and VR targets without sending motion commands:
+Configure the Robot and Teleoperator directly. The Robot resolves its pinned model,
+and LeRobot selects the VR action processor automatically. No generated configuration
+or contract file is needed. Replace `enP8p1s0` with the robot-facing interface:
 
 ```bash
 lerobot-teleoperate \
-  --config_path="$arm_run/teleoperate.json" \
+  --robot.type=unitree_g1_motion \
   --robot.mode=shadow \
-  --robot.contract=arm-contract.json \
-  --robot.report_path="$arm_run/shadow.jsonl" \
+  --robot.arm_sdk.network_interface=enP8p1s0 \
+  --teleop.type=xr_controllers \
+  --teleop.full_input=true \
+  --teleop.terminal_control=true \
   --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
   --teleop.accept_cloudxr_eula=true
 ```
 
-Type `r` then Enter and check starting posture, left/right correspondence, and
-proposed targets in the report. `motor_publication` and `base_rpc` must remain
-false. Exit with `q` before the next session. Reports refuse overwrites; choose
-new output paths for repeated runs.
+Shadow mode reads joint feedback but never acquires arm authority. The terminal
+prints the hardware mode and a fresh report path. Type `r` then Enter to inspect
+proposed targets; check joint identity, starting posture, and left/right mapping.
+`motor_publication` and `base_rpc` must remain false. Exit with `q` before continuing.
+A reported mode byte must be checked against the manufacturer's operating procedure.
 
 #### Run Physical Arm Teleoperation
 
-After the hardware checks and `vr_pose_mapping_reviewed` are complete:
+Use the observed, approved mode as `G1_MODE_MACHINE`. Set `ARM_KP`, `ARM_KD`, and
+`ARM_TORQUE_LIMITS` to reviewed JSON lists of 14 positive values, ordered left arm
+then right arm: shoulder pitch/roll/yaw, elbow, wrist roll/pitch/yaw. The command
+requires these explicitly; it does not choose physical gains or torque limits.
 
 ```bash
 lerobot-teleoperate \
-  --config_path="$arm_run/teleoperate.json" \
+  --robot.type=unitree_g1_motion \
   --robot.mode=arms \
-  --robot.contract=arm-contract.json \
   --robot.enable_motion=true \
   --robot.enable_locomotion=false \
-  --robot.report_path="$arm_run/arms.jsonl" \
+  --robot.arm_sdk.network_interface=enP8p1s0 \
+  --robot.arm_sdk.expected_mode_machine="$G1_MODE_MACHINE" \
+  --robot.arm_sdk.kp="$ARM_KP" \
+  --robot.arm_sdk.kd="$ARM_KD" \
+  --robot.arm_sdk.torque_limits="$ARM_TORQUE_LIMITS" \
+  --teleop.type=xr_controllers \
+  --teleop.full_input=true \
+  --teleop.terminal_control=true \
   --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
   --teleop.accept_cloudxr_eula=true
 ```
 
+Joint bounds default to the selected model; `--robot.arm_sdk.lower` and `upper`
+can narrow them. Velocity, acceleration, displacement, tracking-error, tilt, and
+freshness limits remain enforced. The default per-session displacement is 0.05 rad.
+Review payload/gravity, command ownership, stop behavior, and authority handover
+before motion; retain an independent stop mechanism for process or network failure.
+
 - `r` then Enter enables following; start still, then move one arm slightly.
-- `p` pauses following; it does not release arm torque. `q` exits and attempts
-  arm-authority handover. Verify actual handover on the robot.
+- `p` pauses following without releasing torque. `q` exits and attempts handover.
 - Tracking loss pauses following and requires `r` to resume. Restart after a
   transport/watchdog fault.
 
-Arm mapping is continuous and head-relative, not squeeze-to-clutch. The contract
-bounds per-session displacement (0.05 rad by default). Sticks do not command
-locomotion in arm mode; hands are not actuated. There is no collision avoidance,
-and the static gravity model must match the actual hand/tool payload.
+Mapping is continuous and head-relative, not squeeze-to-clutch. Sticks do not
+command locomotion in arm mode; hands are not actuated. No collision avoidance
+is provided. `--robot.assets` overrides the model location, and
+`--robot.report_path` overrides the automatically created session report.
+Existing `--robot.contract` files and saved action processors remain supported;
+do not combine a contract with direct `--robot.arm_sdk.*` settings.
 
 To include video during shadow or arm control, run the separate
 `examples/unitree_g1/validate_xr_readonly.py camera` producer in another terminal
