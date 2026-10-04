@@ -7,13 +7,18 @@ No XR device code, IK action mapping, or teleoperation loop belongs here.
 """
 
 import json
+import logging
 import time
 from contextlib import ExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 
+from lerobot.cameras import Camera, CameraConfig
+from lerobot.cameras.configs import ColorMode
+from lerobot.cameras.frame_channel import FrameWriter
+from lerobot.cameras.utils import make_cameras_from_configs
 from lerobot.robots.config import RobotConfig
 from lerobot.robots.robot import Robot
 
@@ -28,7 +33,7 @@ from .g1_vr_processor import CONTROL_KEYS
 @RobotConfig.register_subclass("unitree_g1_motion")
 @dataclass(kw_only=True)
 class UnitreeG1MotionConfig(RobotConfig):
-    assets: str
+    assets: str | None = None
     mode: str = "simulation"
     contract: str | None = None
     enable_motion: bool = False
@@ -36,19 +41,32 @@ class UnitreeG1MotionConfig(RobotConfig):
     onscreen: bool = False
     video_channel: str | None = None
     report_path: str | None = None
+    cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         super().__post_init__()
-        if self.mode not in ("simulation", "shadow", "arms", "walk", "combined"):
+        if self.mode not in ("camera", "simulation", "shadow", "arms", "walk", "combined"):
             raise ValueError("Unknown G1 motion mode")
+        if self.mode != "camera" and not self.assets:
+            raise ValueError("Simulation and hardware feedback/control require assets")
+        if self.mode == "camera":
+            if len(self.cameras) != 1 or not self.video_channel or self.onscreen:
+                raise ValueError(
+                    "Camera mode requires exactly one camera and a video_channel, without onscreen"
+                )
+            camera = next(iter(self.cameras.values()))
+            if getattr(camera, "color_mode", ColorMode.RGB) != ColorMode.RGB:
+                raise ValueError("XR video requires RGB camera output")
+        elif self.cameras:
+            raise ValueError("Integrated cameras currently require camera mode")
         physical = self.mode in ("arms", "walk", "combined")
         if self.enable_motion != physical:
             raise ValueError("Only physical motion modes require enable_motion=true")
         if self.enable_locomotion != (self.mode in ("walk", "combined")):
             raise ValueError("Only walk/combined require enable_locomotion=true")
-        if self.mode != "simulation" and (not self.contract or not self.report_path):
+        if self.mode not in ("simulation", "camera") and (not self.contract or not self.report_path):
             raise ValueError("Physical feedback/control requires contract and report_path")
-        if self.mode != "simulation" and (self.onscreen or self.video_channel):
+        if self.mode not in ("simulation", "camera") and (self.onscreen or self.video_channel):
             raise ValueError("Physical video uses a separate camera producer, not Robot rendering")
 
 
@@ -64,13 +82,20 @@ class UnitreeG1Motion(Robot):
         self._stack = None
         self.sim = self.arm = self.base = self.writer = self.report = None
         self.damp_requested = False
+        self.cameras: dict[str, Camera] = {}
+        self._camera_read_started = 0
+        self._camera_timed_out = False
 
     @property
     def action_features(self) -> dict:
+        if self.config.mode == "camera":
+            return {"control.quit": bool}
         return dict.fromkeys((*ARM_KEYS, *CONTROL_KEYS), float)
 
     @property
     def observation_features(self) -> dict:
+        if self.config.mode == "camera":
+            return {name: (cfg.height, cfg.width, 3) for name, cfg in self.config.cameras.items()}
         return {f"{j.name}.{field}": float for j in G1_29_JointIndex for field in ("q", "dq", "tau")}
 
     @property
@@ -97,13 +122,29 @@ class UnitreeG1Motion(Robot):
             raise RuntimeError("Use a fresh G1 session; reconnect is not supported")
         self._used = True
         self._stack = ExitStack()
-        assets = Path(self.config.assets)
         try:
             if self.config.report_path:
                 self.report = self._stack.enter_context(Path(self.config.report_path).open("x"))  # noqa: SIM115
             self._record(
                 event="starting", mode=self.config.mode, hardware_acceptance="pending_operator_review"
             )
+            if self.config.mode == "camera":
+                self.cameras = make_cameras_from_configs(self.config.cameras)
+                for camera in self.cameras.values():
+                    camera.connect()
+                    self._stack.callback(camera.disconnect)
+                    # Drain the initial buffered frame. Subsequent async reads consume new frames.
+                    self._camera_read_started = time.monotonic_ns()
+                    camera.async_read(timeout_ms=1000)
+                camera_config = next(iter(self.config.cameras.values()))
+                self.writer = FrameWriter(
+                    self.config.video_channel, camera_config.width, camera_config.height
+                )
+                self._stack.callback(self.writer.close)
+                self._connected = True
+                self._record(event="ready", mode="camera", motor_publication=False, base_rpc=False)
+                return
+            assets = Path(self.config.assets)
             self.gravity = G1VRKinematics(assets)
             if self.config.mode == "simulation":
                 from .g1_vr_simulation import G1VRSimulation
@@ -116,8 +157,6 @@ class UnitreeG1Motion(Robot):
                 for _ in range(100):
                     self.sim.step(q, self.gravity.gravity(q))
                 if self.config.video_channel:
-                    from lerobot.cameras.frame_channel import FrameWriter
-
                     self.writer = FrameWriter(self.config.video_channel, 640, 480)
                     self._stack.callback(self.writer.close)
             else:
@@ -158,6 +197,24 @@ class UnitreeG1Motion(Robot):
     def get_observation(self) -> dict:
         if not self.is_connected:
             raise RuntimeError("G1 not connected")
+        if self.config.mode == "camera":
+            name, camera = next(iter(self.cameras.items()))
+            started = time.monotonic_ns()
+            try:
+                pixels = camera.async_read(timeout_ms=200)
+            except TimeoutError:
+                if not self._camera_timed_out:
+                    logging.warning("Camera frames timed out; XR will show an unavailable placeholder")
+                self._camera_timed_out = True
+                return {}
+            # Lower bound on acquisition, not sensor exposure time. Never restamp cached images.
+            captured, self._camera_read_started = self._camera_read_started, started
+            self._camera_timed_out = False
+            published = self.writer.publish(
+                pixels, {"captured_monotonic_ns": captured, "embodiment": "g1-29-physical-camera"}
+            )
+            self._record(event="camera", sequence=self.writer.sequence, published=published)
+            return {name: pixels}
         observation = self.sim.observation() if self.sim else self.arm.observation()
         if self.writer:
             captured = time.monotonic_ns()
@@ -169,6 +226,11 @@ class UnitreeG1Motion(Robot):
     def send_action(self, action: dict) -> dict:
         if not self.is_connected:
             raise RuntimeError("G1 not connected")
+        if self.config.mode == "camera":
+            # XR poses/buttons are observational in camera mode; there is no motor transport.
+            if action.get("control.quit", False):
+                raise KeyboardInterrupt
+            return {"control.quit": False}
         if set(action) != set(self.action_features) or not np.isfinite(list(action.values())).all():
             raise ValueError("G1 motion requires the complete processed action contract")
         if not 0 <= time.monotonic() - action["control.created_at"] <= 0.25:

@@ -41,6 +41,7 @@ class CameraDisplay:
         self.layer = None
         self.gpu = None
         self.last_key = None
+        self.last_captured_ns = None
         self.status = None
         self.stats = {
             "frame_loops": 0,
@@ -97,7 +98,16 @@ class CameraDisplay:
 
     def update_camera(self):
         try:
-            frame = read_frame(self.config.channel, self.config.max_age_s)
+            frame = read_frame(self.config.channel, self.config.max_age_s, raise_on_busy=True)
+        except BlockingIOError:
+            # A producer writing the next frame does not invalidate the displayed frame.
+            # Keep its original timestamp so repeated contention cannot mask camera loss.
+            if self.status == "live" and self.last_captured_ns is not None:
+                age_s = (time.monotonic_ns() - self.last_captured_ns) / 1e9
+                if 0 <= age_s <= self.config.max_age_s:
+                    self.stats["camera_age_ms"] = age_s * 1000
+                    return
+            frame = None
         except (ValueError, KeyError, OSError):
             frame = None
         status = "Camera unavailable or stale"
@@ -112,6 +122,7 @@ class CameraDisplay:
                 status = "live"
                 key = metadata["session_id"], metadata["sequence"]
                 self.stats["camera_age_ms"] = (time.monotonic_ns() - metadata["captured_monotonic_ns"]) / 1e6
+                self.last_captured_ns = metadata["captured_monotonic_ns"]
                 if key != self.last_key or self.status != status:
                     self._upload(pixels)
                     self.last_key = key

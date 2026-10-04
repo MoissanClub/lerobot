@@ -112,8 +112,10 @@ class FrameWriter:
             self.owner = None
 
 
-def read_frame(path: str | Path, max_age_s: float = 1.0) -> tuple[dict[str, Any], NDArray[np.uint8]] | None:
-    """Return owned (metadata, RGB pixels), or None if missing, busy, or stale."""
+def read_frame(
+    path: str | Path, max_age_s: float = 1.0, *, raise_on_busy: bool = False
+) -> tuple[dict[str, Any], NDArray[np.uint8]] | None:
+    """Return owned RGB pixels, or None if unavailable; optionally distinguish lock contention."""
     if not np.isfinite(max_age_s) or max_age_s <= 0:
         raise ValueError("max_age_s must be positive finite")
     try:
@@ -124,6 +126,8 @@ def read_frame(path: str | Path, max_age_s: float = 1.0) -> tuple[dict[str, Any]
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
+            if raise_on_busy:
+                raise
             return None
         size = os.fstat(fd).st_size
         if size < HEADER_BYTES:

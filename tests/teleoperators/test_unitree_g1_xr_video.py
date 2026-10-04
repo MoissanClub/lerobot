@@ -143,3 +143,38 @@ def test_real_offscreen_delivery_and_recovery(tmp_path):
         if display is not None:
             display.close()
         writer.close()
+
+
+def test_busy_channel_keeps_only_fresh_displayed_frame(tmp_path, monkeypatch):
+    import fcntl
+    from unittest.mock import Mock
+
+    from lerobot.teleoperators.xr_controllers import camera_display as module
+
+    writer = FrameWriter(tmp_path / "rgb", 8, 6)
+    display = CameraDisplay.__new__(CameraDisplay)
+    display.config = VideoConfig(channel=str(writer.path), width=8, height=6, max_age_s=0.5)
+    display.status = display.last_key = display.last_captured_ns = None
+    display.stats = {"camera_uploads": 0, "placeholder_uploads": 0}
+    display._upload = Mock()
+    stamp = time.monotonic_ns()
+    monkeypatch.setattr(module.time, "monotonic_ns", lambda: stamp)
+    try:
+        writer.publish(np.zeros((6, 8, 3), dtype=np.uint8), {"captured_monotonic_ns": stamp})
+        display.update_camera()
+        assert display.status == "live"
+        fcntl.flock(writer.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert read_frame(writer.path) is None
+        with pytest.raises(BlockingIOError):
+            read_frame(writer.path, raise_on_busy=True)
+        stamp += 100_000_000
+        display.update_camera()
+        assert display.status == "live"
+        assert display.stats["camera_uploads"] == 1
+        assert display.stats["placeholder_uploads"] == 0
+        stamp += 500_000_000
+        display.update_camera()
+        assert display.status == "Camera unavailable or stale"
+        assert display.stats["placeholder_uploads"] == 1
+    finally:
+        writer.close()
