@@ -1,26 +1,19 @@
 # G1-29 VR: Manual Validation
 
-Standard-CLI migration: use [the new commands](g1_vr_standard_cli) on
-`work/g1-vr-teleoperate` for simulation. Commands below preserve the standalone
-checkpoint and physical acceptance gates; the new CLI has not passed hardware
-or headset acceptance. Jetson runtime support remains unverified: do not assume
-that the x86 Isaac Teleop environment runs unchanged on onboard PC2.
-
-Branch: `work/g1-29-vr-teleop` in `MoissanClub/lerobot`, based on `g1/bugfixes`
-`321180e74`. This is a supervised-validation candidate, not a hardware-approved
-release. No physical commands or headset acceptance were performed during
-implementation. G1-23, BrainCo actuation, SONIC and dataset recording are deferred.
+Use the [standard CLI guide](g1_vr_standard_cli) for `lerobot-teleoperate`.
+The standalone examples below provide individual validation procedures for
+simulation, camera delivery, feedback, and bounded hardware motion.
+G1-23, hand actuation, SONIC, and dataset recording are outside this workflow.
 
 Run the following sequence on the G1's onboard PC2. Simulation does not initialize
 DDS, even on PC2. Physical modes explicitly subscribe to the selected interface.
 Do **not** run `run_g1_server.py`, MotionSwitcher/ReleaseMode, another arm publisher,
 or another locomotion application alongside these examples.
 
-## Checkout and Environment
+## Environment
 
 ```bash
-git clone --branch work/g1-29-vr-teleop https://github.com/MoissanClub/lerobot.git g1-vr-teleop
-cd g1-vr-teleop
+cd /path/to/lerobot
 conda activate lerobot-dev
 export PYTHONPATH="$PWD/src" PYTHONNOUSERSITE=1
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MUJOCO_GL=egl
@@ -29,17 +22,15 @@ python -c 'import lerobot; print(lerobot.__file__)'
 
 The printed path must be this checkout's `src/lerobot`. The examples reject an
 import from another checkout. Do not switch branches while a test is running.
-On the development host this checkout is `/home/dwei/lerobot-sim/g1-vr-teleop`.
 
 Use the existing matching environment, or install LeRobot's `unitree_g1`, `test`
 and `dev` extras, the Unitree SDK, and Hub simulation dependencies as described in
 [the G1 guide](unitree_g1). Install Pinocchio **from conda-forge**, including its
-CasADi bindings, not pip `pin`. Tested versions: Python 3.12, Pinocchio 3.9.0,
-CasADi 3.7.2, MuJoCo 3.12.0, unitree_sdk2py 1.0.1, ONNX Runtime 1.30.0 and
-Isaac Teleop 1.3.132rc1. The latter supplies the HeadSource/controller schema used
-here. Follow [Isaac Teleop installation](isaac_teleop) for the CloudXR extras,
-GPU/driver and network prerequisites. A fresh PC2 installation is a separate
-acceptance check; these commands were verified in the existing development env.
+CasADi bindings, not pip `pin`. Follow [Isaac Teleop installation](isaac_teleop) for the CloudXR extras,
+GPU/driver and network prerequisites. On PC2, use the platform environment
+setup before starting these examples; see the Orin video settings in the
+[standard CLI guide](g1_vr_standard_cli).
+
 
 Prepare pinned public assets, then disable downloads during testing:
 
@@ -95,8 +86,7 @@ CUDA/Vulkan support are required; CPU physics success does not verify CloudXR.
 Optional desktop view: add `--onscreen`. For viewer-only use `MUJOCO_GL=glfw` and
 omit `--video`; this can run through `ssh -Y`, subject to the client's GLX support.
 SSH forwarding does not carry headset video. For combined viewer/video use local
-display with `MUJOCO_GL=egl`; remote GLX support varies. All automated checks were
-headless; X and headset viewing remain manual.
+display with `MUJOCO_GL=egl`; remote GLX support varies. Validate desktop and headset viewing separately.
 
 ### Controls and Observations
 
@@ -213,10 +203,7 @@ unexpected other-joint motion. Inspect the report and physical handover before
 repeating with `kRightElbow.q` and a new filename. The automated arm fixture locks
 pelvis/lower joints with model constraints; it verifies the arm command/backend
 path, not stock balance or firmware blend behavior. Physical limits are unchanged.
-Physics regression uses a simulation-only 0.5 s scheduling budget on the shared
-development host. The hardware template retains 0.1 s freshness/command budgets;
-watchdog failures are tested separately. A loaded-host diagnostic did correctly
-reject a >0.1 s feedback gap. Simulation passes do not certify PC2 timing.
+Simulation timing does not establish hardware feedback or watchdog timing.
 
 ## 7. Stationary Physical VR Arms
 
@@ -260,12 +247,9 @@ Finger actuators receive zero commands; no hand driver is enabled. A bare wrist 
 BrainCo-equipped physical robot is a different payload, not automatically a matching
 gravity model. No collision avoidance is provided.
 
-## Evidence
+## Automated Regression
 
-2026-09-29 local regression: **167 passed, 1 skipped** (opt-in GPU headset test).
-A 15-second synthetic combined run completed without IK pauses. Static arm gravity
-agreement between the aligned models was within `8.1e-6 Nm`. Local regression XML:
-`/tmp/g1-vr-final-regression.xml` (ephemeral evidence, not a checked-in asset).
+Run the focused software checks with the prepared assets:
 
 ```bash
 G1_VR_ASSETS="$ASSETS" python -m pytest -q \
@@ -280,6 +264,6 @@ G1_VR_ASSETS="$ASSETS" python -m pytest -q \
 Automated suites cover SDK packets/authority/watchdogs, read-only boundaries,
 mapping and installed XR schema, camera freshness/recovery, real headless physics,
 GR00T directions and supported-arm hold/joint tests. GPU headset delivery, X viewing,
-fresh PC2 installation and **every physical stage remain manual**. `completed` or
+PC2 installation and physical stages require operator validation. `completed` or
 `software_checks_passed` never means hardware acceptance; reports retain
 `pending_operator_review`. Preserve reports and the exact source revision for review.
