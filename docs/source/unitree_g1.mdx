@@ -1,10 +1,5 @@
 # Unitree G1
 
-For G1-29 VR teleoperation, follow the [standard CLI guide](g1_vr_standard_cli)
-and [ordered manual tests](g1_vr_manual_test_plan) for isolated
-MuJoCo/GR00T simulation, read-only hardware and explicitly gated arm/base commands.
-It does not use the whole-body server described by other workflows below.
-
 <img
   src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/unitree_thumbnail.jpg"
   alt="Unitree G1 locomanipulation demo"
@@ -68,6 +63,71 @@ This will launch a [MuJoCo sim instance](https://huggingface.co/lerobot/unitree-
 
 - Press `9` to release the robot
 - Press `7` / `8` to increase / decrease waist height
+
+#### Simulation with VR (IsaacTeleops)
+
+Use an Isaac Teleop headset and controllers to move the simulated G1-29 arms
+and base while viewing the simulated head camera in VR. Install the CloudXR and
+video dependencies from the [Isaac Teleop guide](isaac_teleop) in the same Python
+environment as LeRobot. Run the commands below from the LeRobot repository root.
+
+On G1 onboard PC2, first load the environment provided by the
+[`unitree_g1_dev` Isaac Teleop setup](https://github.com/MoissanClub/unitree_g1_dev/tree/main/pc2/IsaacTeleop).
+This supplies the Jetson native libraries and EGL preload:
+
+```bash
+python_bin="$HOME/miniforge3/envs/lerobot-dev/bin/python"
+lerobot_dir="$HOME/lerobot"
+source "$HOME/unitree_g1_dev/pc2/IsaacTeleop/lerobot_env.sh"
+lerobot_environment
+cd "$lerobot_dir"
+```
+
+Prepare the G1-29 assets and VR action processor in a fresh session directory:
+
+```bash
+vr_run=$(mktemp -d /tmp/g1-vr-XXXXXXXX)
+uv run --no-project --python "$(command -v python)" \
+  examples/unitree_g1/prepare_vr_assets.py --config-dir "$vr_run"
+```
+
+Review NVIDIA's CloudXR EULA before supplying the acceptance flag, then start:
+
+```bash
+MUJOCO_GL=egl lerobot-teleoperate \
+  --config_path="$vr_run/teleoperate.json" \
+  --robot.type=unitree_g1_motion \
+  --robot.mode=simulation \
+  --teleop.type=xr_controllers \
+  --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
+  --teleop.accept_cloudxr_eula=true \
+  --teleop.video_channel="$vr_run/camera.rgb" \
+  --robot.video_channel="$vr_run/camera.rgb" \
+  --teleop.video_openxr_composition=false
+```
+
+This launches G1-29 MuJoCo/GR00T with VR arm control and headset video, without
+physical motor commands. The composition option avoids a black camera panel on Orin.
+
+Keep the terminal running and put the headset on the same reachable network:
+
+1. Open `https://<SIMULATION-HOST-IP>:48322` in the headset browser and accept
+   the local certificate. Use the host's Wi-Fi/LAN address, not `localhost`.
+2. Open the [NVIDIA Isaac Teleop client](https://nvidia.github.io/IsaacTeleop/client).
+   The PC2 installer adds a certificate-page button that opens this client with
+   the IP and port filled in. Otherwise, enter the host IP and port `48322`.
+3. Select **H.264** on Orin, click **Connect**, then **Play** to enter VR.
+   You should see the simulated robot camera view.
+
+- Type `r` then Enter in the launching terminal to start arm/base tracking.
+- Move each controller to move the corresponding arm; keep sticks centered to
+  test arms first. Left stick controls translation; right stick controls yaw.
+- Type `p` then Enter to pause, and `q` then Enter to quit.
+- After tracking loss, wake both controllers and type `r` then Enter to resume.
+
+This workflow uses a fixed G1-29 model with locked fingers; the end-effector
+options below apply to `unitree_g1`. Add `--robot.onscreen=true` for an optional
+desktop window with working OpenGL. Run one CloudXR/XR session at a time.
 
 #### Choosing the End Effector
 
@@ -220,6 +280,123 @@ lerobot-teleoperate \
 ```
 
 We support both [GrootLocomotionController](https://github.com/NVlabs/GR00T-WholeBodyControl) and [HolosomaLocomotionController](https://github.com/amazon-far/holosoma) via `--robot.controller`.
+
+### Physical VR Arm Teleoperation (Isaac Teleop)
+
+Run on PC2 with the environment from
+[Simulation with VR](#simulation-with-vr-isaacteleops). This workflow uses
+`unitree_g1_motion`: arm targets go through `rt/arm_sdk` while the stock Unitree
+controller retains balance. Stop the whole-body server from the preceding section
+and other motion applications before using it. Do not release the stock motion mode.
+
+#### View the Robot Camera
+
+Discover the RGB device with `lerobot-find-cameras opencv` (or `realsense`) and
+inspect its preview image. Replace index `4` below with the selected device:
+
+```bash
+camera_run=$(mktemp -d /tmp/g1-camera-XXXXXXXX)
+lerobot-teleoperate \
+  --robot.type=unitree_g1_motion \
+  --robot.mode=camera \
+  --robot.cameras='{"head": {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30}}' \
+  --robot.video_channel="$camera_run/camera.rgb" \
+  --teleop.type=xr_controllers \
+  --teleop.terminal_control=true \
+  --teleop.video_channel="$camera_run/camera.rgb" \
+  --teleop.video_source=g1-29-physical-camera \
+  --teleop.video_openxr_composition=false \
+  --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
+  --teleop.accept_cloudxr_eula=true \
+  --fps=30
+```
+
+Connect and Play as in simulation; video appears without `r`. This mode opens
+only the camera, with no joint feedback or motion transport. Check the real
+scene, orientation, color, and responsiveness. Camera timeouts replace stale
+video with an unavailable placeholder. Type `q` then Enter to close the session
+before starting arm control. The composition option is for Orin.
+
+#### Prepare and Check Arm Control
+
+Prepare a fresh configuration with the VR action processor and create a contract:
+
+```bash
+arm_run=$(mktemp -d /tmp/g1-vr-arms-XXXXXXXX)
+uv run --no-project --python "$(command -v python)" \
+  examples/unitree_g1/prepare_vr_assets.py --config-dir "$arm_run"
+ASSETS=$(uv run --no-project --python "$(command -v python)" -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["robot"]["assets"])' \
+  "$arm_run/teleoperate.json")
+uv run --no-project --python "$(command -v python)" \
+  examples/unitree_g1/validate_arm_sdk.py \
+  --urdf "$ASSETS/assets/g1_body29_hand14.urdf" --write-template arm-contract.json
+```
+
+Create the contract once and retain it for subsequent sessions. Its defaults are
+examples, not approved gains or limits. Set `arm_sdk.network_interface` to the
+robot-facing interface. Review robot identity/mode, command ownership, payload,
+gains/limits, and stop/handover behavior before approving the contract fields.
+Use `validate_arm_sdk.py --help` for read-only feedback, supervised hold, and
+bounded joint checks; hold and joint checks apply torque. Provide an independent
+stop mechanism: a Python watchdog cannot act after process death.
+
+Preview real joint feedback and VR targets without sending motion commands:
+
+```bash
+lerobot-teleoperate \
+  --config_path="$arm_run/teleoperate.json" \
+  --robot.mode=shadow \
+  --robot.contract=arm-contract.json \
+  --robot.report_path="$arm_run/shadow.jsonl" \
+  --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
+  --teleop.accept_cloudxr_eula=true
+```
+
+Type `r` then Enter and check starting posture, left/right correspondence, and
+proposed targets in the report. `motor_publication` and `base_rpc` must remain
+false. Exit with `q` before the next session. Reports refuse overwrites; choose
+new output paths for repeated runs.
+
+#### Run Physical Arm Teleoperation
+
+After the hardware checks and `vr_pose_mapping_reviewed` are complete:
+
+```bash
+lerobot-teleoperate \
+  --config_path="$arm_run/teleoperate.json" \
+  --robot.mode=arms \
+  --robot.contract=arm-contract.json \
+  --robot.enable_motion=true \
+  --robot.enable_locomotion=false \
+  --robot.report_path="$arm_run/arms.jsonl" \
+  --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
+  --teleop.accept_cloudxr_eula=true
+```
+
+- `r` then Enter enables following; start still, then move one arm slightly.
+- `p` pauses following; it does not release arm torque. `q` exits and attempts
+  arm-authority handover. Verify actual handover on the robot.
+- Tracking loss pauses following and requires `r` to resume. Restart after a
+  transport/watchdog fault.
+
+Arm mapping is continuous and head-relative, not squeeze-to-clutch. The contract
+bounds per-session displacement (0.05 rad by default). Sticks do not command
+locomotion in arm mode; hands are not actuated. There is no collision avoidance,
+and the static gravity model must match the actual hand/tool payload.
+
+To include video during shadow or arm control, run the separate
+`examples/unitree_g1/validate_xr_readonly.py camera` producer in another terminal
+(see its `--help`). Add these options to the command above, using its channel path:
+
+```bash
+--teleop.video_channel=/tmp/lerobot-physical-camera.rgb \
+--teleop.video_source=g1-29-physical-camera \
+--teleop.video_openxr_composition=false
+```
+
+Only one process may own the camera. Stop camera-only mode first; do not pass
+`robot.cameras` or `robot.video_channel` in shadow/arms mode.
 
 ---
 

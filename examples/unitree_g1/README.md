@@ -1,7 +1,9 @@
 # G1-29 VR Teleoperation Examples
 
-Start with the [standard CLI guide](../../docs/source/g1_vr_standard_cli.mdx)
-and [manual validation procedure](../../docs/source/g1_vr_manual_test_plan.mdx).
+See the [G1 user guide](../../docs/source/unitree_g1.mdx#simulation-with-vr-isaacteleops)
+for VR simulation setup and controls, and
+[physical VR arm teleoperation](../../docs/source/unitree_g1.mdx#physical-vr-arm-teleoperation-isaac-teleop)
+for camera viewing and hardware operation.
 Simulation is the default and has no DDS participant. This workflow is separate
 from the legacy whole-body server.
 
