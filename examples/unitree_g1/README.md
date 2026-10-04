@@ -1,7 +1,7 @@
 # G1-29 VR Teleoperation Examples
 
-See the [G1 user guide](../../docs/source/unitree_g1.mdx) for VR simulation,
-physical operation, and hardware setup checks.
+See the [G1 user guide](../../docs/source/unitree_g1.mdx#simulation-with-vr-isaacteleops)
+for VR simulation setup and controls.
 Simulation is the default and has no DDS participant. This workflow is separate
 from the legacy whole-body server.
 
