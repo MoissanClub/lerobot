@@ -1,5 +1,7 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # Licensed under the Apache License, Version 2.0. See LICENSE in the project root.
+import json
+import time
 from dataclasses import replace
 from unittest.mock import Mock
 
@@ -81,10 +83,22 @@ def test_shadow_forces_read_only_without_command_transport(tmp_path, monkeypatch
     robot.connect()
     try:
         assert sdk.call_args.args[0].read_only
+        arm.active = False
+        arm.observation.return_value = dict.fromkeys(robot.observation_features, 0.0)
+        action = dict.fromkeys(robot.action_features, 0.0)
+        action.update({"control.created_at": time.monotonic(), "control.enabled": 1.0, "control.live": 1.0})
+        robot.send_action(action)
         arm.activate.assert_not_called()
+        arm.send.assert_not_called()
     finally:
         robot.disconnect()
     arm.close.assert_called_once()
+    rows = [json.loads(line) for line in (tmp_path / "report.jsonl").read_text().splitlines()]
+    sample = next(row for row in rows if row["event"] == "action")
+    assert sample["enabled"] and not sample["motor_publication"] and not sample["base_rpc"]
+    assert len(sample["observation"]) == 29 * 3
+    assert len(sample["measured"]) == len(sample["target"]) == 14
+    assert sample["recorded_at"] >= sample["created_at"]
 
 
 def test_direct_arm_limits_and_mode_are_required_and_model_bounded(tmp_path, monkeypatch):
@@ -115,3 +129,76 @@ def test_direct_arm_limits_and_mode_are_required_and_model_bounded(tmp_path, mon
         robot._direct_arm_config(tmp_path / "robot.urdf")
     with pytest.raises(ValueError, match="not both"):
         g1_motion.UnitreeG1MotionConfig(**kwargs, arm_sdk=sdk, contract="old.json")
+
+
+def test_arm_test_cli_profile_cannot_widen_motion_bounds(tmp_path, monkeypatch):
+    cfg = draccus.parse(
+        TeleoperateConfig,
+        args=[
+            "--robot.type=unitree_g1_motion",
+            "--robot.mode=arms",
+            "--robot.arm_test=true",
+            "--robot.arm_test_workspace=small",
+            "--robot.enable_motion=true",
+            "--robot.arm_sdk.network_interface=robot_eth",
+            "--robot.arm_sdk.max_velocity=1",
+            "--robot.arm_sdk.max_displacement=1",
+            "--teleop.type=xr_controllers",
+            "--teleop.full_input=true",
+        ],
+    )
+    monkeypatch.setattr(
+        g1_motion,
+        "model_limits",
+        lambda _: {
+            "lower": [-2.0] * 14,
+            "upper": [2.0] * 14,
+            "effort": [20.0] * 14,
+        },
+    )
+    monkeypatch.setattr(g1_motion, "validate_arm_model", Mock())
+    actual = g1_motion.UnitreeG1Motion(cfg.robot)._direct_arm_config(tmp_path / "robot.urdf")
+    assert actual.max_velocity == 0.02
+    assert actual.max_acceleration == 0.05
+    assert actual.max_displacement == 0.03
+    assert actual.max_wrist_displacement == 0.025
+    assert actual.start_position == [0.0] * 14
+    assert actual.start_tolerance == 0.05
+    assert actual.blend_s == 5
+    assert actual.kp == [60.0] * 14 and actual.kd == [1.5] * 14
+    assert not actual.read_only
+    cfg.robot.arm_test_start_pose = "current"
+    current = g1_motion.UnitreeG1Motion(cfg.robot)._direct_arm_config(tmp_path / "robot.urdf")
+    assert current.start_position == []
+    assert current.max_displacement == actual.max_displacement
+    assert current.max_wrist_displacement == actual.max_wrist_displacement
+    assert current.max_velocity == actual.max_velocity
+    with pytest.raises(ValueError, match="requires arm_test"):
+        g1_motion.UnitreeG1MotionConfig(arm_test_start_pose="current")
+    with pytest.raises(ValueError, match="arm_test"):
+        g1_motion.UnitreeG1MotionConfig(mode="simulation", arm_test=True)
+
+
+def test_front_box_profile_retains_slow_limits_and_selects_countdown(tmp_path, monkeypatch):
+    limits = {"lower": [-2.0] * 14, "upper": [2.0] * 14, "effort": [20.0] * 14}
+    monkeypatch.setattr(g1_motion, "model_limits", lambda _: limits)
+    monkeypatch.setattr(g1_motion, "validate_arm_model", lambda *_: None)
+    monkeypatch.setattr(g1_vr_processor, "resolve_g1_vr_assets", lambda _: "/model")
+    monkeypatch.setattr(g1_vr_processor, "G1VRKinematics", Mock())
+    cfg = g1_motion.UnitreeG1MotionConfig(
+        mode="arms",
+        arm_test=True,
+        arm_test_start_pose="current",
+        enable_motion=True,
+        arm_sdk=G1ArmSDKConfig(network_interface="robot-test"),
+    )
+    robot = g1_motion.UnitreeG1Motion(cfg)
+    sdk = robot._direct_arm_config(tmp_path / "robot.urdf")
+    assert sdk.max_velocity == 0.02
+    assert sdk.max_acceleration == 0.05
+    assert sdk.max_wrist_displacement is None
+    assert sdk.workspace_lower == [0, -0.5, -0.5]
+    assert sdk.workspace_upper == [1, 0.5, 0.5]
+    assert sdk.max_displacement == 4.0
+    processors = make_default_processors(robot_config=cfg, teleop_config=XRControllersConfig(full_input=True))
+    assert processors[0].steps[0].workspace == "front_box"

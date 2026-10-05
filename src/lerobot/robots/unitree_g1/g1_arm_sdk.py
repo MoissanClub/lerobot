@@ -39,6 +39,11 @@ class G1ArmSDKConfig:
     max_velocity: float = 0.1
     max_acceleration: float = 0.5
     max_displacement: float = 0.05
+    max_wrist_displacement: float | None = None
+    workspace_lower: list[float] = field(default_factory=list)
+    workspace_upper: list[float] = field(default_factory=list)
+    start_position: list[float] = field(default_factory=list)
+    start_tolerance: float = 0.05
     max_tracking_error: float = 0.1
     max_measured_velocity: float = 0.5
     max_feedforward: float = 5.0
@@ -74,12 +79,28 @@ class G1ArmSDKConfig:
             "max_measured_velocity",
             "max_feedforward",
             "max_tilt_rad",
+            "start_tolerance",
         ):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be positive and finite")
         if self.period_s > min(self.command_timeout_s, self.max_state_age_s) / 2:
             raise ValueError("Control period must be at most half the freshness bounds")
+        if self.max_wrist_displacement is not None and (
+            not math.isfinite(self.max_wrist_displacement) or self.max_wrist_displacement <= 0
+        ):
+            raise ValueError("max_wrist_displacement must be positive and finite")
+        if (self.workspace_lower or self.workspace_upper) and (
+            len(self.workspace_lower) != 3
+            or len(self.workspace_upper) != 3
+            or not np.isfinite([self.workspace_lower, self.workspace_upper]).all()
+            or np.any(np.array(self.workspace_lower) >= self.workspace_upper)
+        ):
+            raise ValueError("Workspace bounds must be finite ordered xyz triples")
+        if self.start_position and (
+            len(self.start_position) != 14 or not np.isfinite(self.start_position).all()
+        ):
+            raise ValueError("start_position requires 14 finite arm joint values")
         for name in ("kp", "kd", "lower", "upper", "torque_limits"):
             values = getattr(self, name)
             if (values or not self.read_only) and (len(values) != 14 or not np.isfinite(values).all()):
@@ -273,6 +294,18 @@ class G1ArmSDK:
             ):
                 raise RuntimeError("Motion requires reviewed expected mode_machine matching feedback")
             self.initial = self._q(state)
+            if (
+                self.config.start_position
+                and np.max(np.abs(self.initial - self.config.start_position)) >= self.config.start_tolerance
+            ):
+                raise RuntimeError(
+                    "Arms are outside the starting pose tolerance; no publisher opened. "
+                    f"Measured arm positions: {self.initial.tolist()}"
+                )
+            if (
+                self.config.max_wrist_displacement is not None or self.config.workspace_lower
+            ) and self.gravity is None:
+                raise RuntimeError("Wrist displacement checks require the gravity/kinematics model")
             self._check_pose(self.initial)
             self.target = self.initial.copy()
             self.previous = self.initial.copy()
@@ -316,16 +349,52 @@ class G1ArmSDK:
         self._check_pose(q)
         if np.max(np.abs(q - self.initial)) > self.config.max_displacement:
             raise RuntimeError("Measured displacement limit exceeded")
+        self._check_wrist_displacement(q)
         if max(abs(state.motor_state[s].dq) for s in ARM_SLOTS) > self.config.max_measured_velocity:
             raise RuntimeError("Measured arm velocity limit exceeded")
         if np.max(np.abs(q - self.previous)) > self.config.max_tracking_error:
             raise RuntimeError("Tracking error limit exceeded")
-        if self.gravity is not None and (
-            max(abs(v) for v in state.imu_state.rpy[:2]) > self.config.max_tilt_rad
-            or max(abs(state.motor_state[s].q) for s in (12, 13, 14)) > self.config.max_tilt_rad
+        if (
+            self.gravity is not None
+            and max(abs(v) for v in state.imu_state.rpy[:2]) > self.config.max_tilt_rad
         ):
-            raise RuntimeError("Reduced gravity model requires upright torso and near-neutral waist")
+            posture = dict(
+                zip(
+                    ("IMU roll", "IMU pitch"),
+                    state.imu_state.rpy[:2],
+                    strict=True,
+                )
+            )
+            exceeded = ", ".join(
+                f"{name}={value:.4f} rad ({np.degrees(value):.2f} deg)"
+                for name, value in posture.items()
+                if abs(value) > self.config.max_tilt_rad
+            )
+            raise RuntimeError(
+                "Reduced gravity model requires upright torso. "
+                f"Outside posture limit: {exceeded}. "
+                f"Limit: +/-{self.config.max_tilt_rad:.4f} rad "
+                f"({np.degrees(self.config.max_tilt_rad):.2f} deg). "
+                "Return the robot to upright posture using its normal controls."
+            )
         return q
+
+    def _check_wrist_displacement(self, q: np.ndarray) -> None:
+        if self.config.workspace_lower:
+            for wrist in self.gravity.fk(q):
+                if np.any(wrist[:3, 3] < self.config.workspace_lower) or np.any(
+                    wrist[:3, 3] > self.config.workspace_upper
+                ):
+                    raise RuntimeError("Robot wrist outside configured Cartesian workspace")
+        if self.config.max_wrist_displacement is None:
+            return
+        origin = self.gravity.fk(self.initial)
+        current = self.gravity.fk(q)
+        if any(
+            np.linalg.norm(pose[:3, 3] - start[:3, 3]) > self.config.max_wrist_displacement
+            for pose, start in zip(current, origin, strict=True)
+        ):
+            raise RuntimeError("Wrist displacement limit exceeded")
 
     def send(self, action):
         with self.lock:
@@ -341,6 +410,7 @@ class G1ArmSDK:
                 self._check_pose(q)
                 if np.max(np.abs(q - self.initial)) > self.config.max_displacement:
                     raise ValueError("Requested displacement limit exceeded")
+                self._check_wrist_displacement(q)
                 self.target = q
                 self.last_command = self.clock()
             except Exception as exc:
@@ -371,6 +441,7 @@ class G1ArmSDK:
             self._check_pose(command)
             if np.max(np.abs(command - self.initial)) > self.config.max_displacement:
                 raise RuntimeError("Slew-limited displacement limit exceeded")
+            self._check_wrist_displacement(command)
             tau = np.zeros(14) if self.gravity is None else self.gravity.gravity(command)
             if not np.isfinite(tau).all() or np.max(np.abs(tau)) > self.config.max_feedforward:
                 raise RuntimeError("Invalid or excessive gravity feedforward")

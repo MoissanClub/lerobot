@@ -341,7 +341,186 @@ proposed targets; check joint identity, starting posture, and left/right mapping
 `motor_publication` and `base_rpc` must remain false. Exit with `q` before continuing.
 A reported mode byte must be checked against the manufacturer's operating procedure.
 
+To record a shadow session, create a new directory and add two options to the
+command above:
+
+```bash
+shadow_run=$(mktemp -d "$HOME/g1-shadow-XXXXXXXX")
+```
+
+```bash
+  --robot.report_path="$shadow_run/report.jsonl" \
+  --teleop.record_path="$shadow_run/xr.jsonl"
+```
+
+Recording starts when the session connects. In the laptop terminal, `r` then Enter
+enables target calculation; `p` then Enter pauses it; `q` then Enter exits and closes
+the files. Paused samples remain recorded with `enabled=false`. Tracking loss also
+pauses target calculation and requires another `r`. No motor commands are published.
+
+`xr.jsonl` contains raw headset/controller inputs, tracking validity, timestamps,
+and start/pause/quit events. `report.jsonl` contains timestamped arm targets and
+measured positions, all 29 joints' position/velocity/estimated torque, and command
+publication flags. Both use the host monotonic clock; they are sequential reads,
+not sensor-synchronized samples. Existing files are never overwritten. Raw input
+can be replayed with `teleop.replay_path` in simulation, with live CloudXR/video
+options removed.
+
+These are diagnostic logs, not a `LeRobotDataset` or physical training
+demonstrations: the robot does not execute the recorded targets. To collect
+demonstrations, the robot must follow the actions in simulation or in an explicitly
+enabled physical session.
+
 #### Run Physical Arm Teleoperation
+
+**Use the gantry for physical arm tests**, with the robot secured according to
+Unitree's procedure. Waist angles do not block activation. Gravity compensation
+still uses a reduced model with the waist fixed at zero; it does not compensate
+for measured waist posture. The IMU torso-tilt check remains active.
+
+For the first arm-only test, select regular action mode using Unitree's controls,
+then use the bounded profile. For video, first run the camera producer in another
+terminal with the configured RGB device (PC2's example below uses OpenCV device 4):
+
+```bash
+uv run --no-project --python "$HOME/miniforge3/envs/lerobot-dev/bin/python" \
+  examples/unitree_g1/validate_xr_readonly.py camera \
+  --device=4 --channel=/tmp/lerobot-physical-camera.rgb \
+  --duration-s=3600 --output="$(mktemp -d /tmp/g1-camera-XXXXXXXX)/report.jsonl"
+```
+
+Keep that producer running while you run the arm command. It streams for up to
+one hour; Ctrl+C stops it. Stop any other process using the camera first.
+
+```bash
+lerobot-teleoperate \
+  --robot.type=unitree_g1_motion \
+  --robot.mode=arms \
+  --robot.arm_test=true \
+  --robot.arm_test_workspace=small \
+  --robot.arm_test_start_pose=current \
+  --robot.enable_motion=true \
+  --robot.enable_locomotion=false \
+  --robot.arm_sdk.network_interface=enP8p1s0 \
+  --teleop.type=xr_controllers \
+  --teleop.full_input=true \
+  --teleop.terminal_control=true \
+  --teleop.video_channel=/tmp/lerobot-physical-camera.rgb \
+  --teleop.video_source=g1-29-physical-camera \
+  --teleop.video_openxr_composition=false \
+  --teleop.cloudxr_config=examples/unitree_g1/cloudxr_quest3.env \
+  --teleop.accept_cloudxr_eula=true \
+  --fps=30
+```
+
+On PC2, load `unitree_g1_dev/pc2/IsaacTeleop/lerobot_env.sh` as described in its
+README before running the command from the LeRobot checkout. Replace the interface
+with your robot-facing Ethernet interface. Connect the headset through the existing
+certificate/client link, then Connect and Play. Confirm the live robot camera
+view before enabling arm following. The composition option is needed on Orin.
+
+The default `arm_test_start_pose=zero` starting reference follows
+[XR Teleoperate's G1-29 controller](https://github.com/unitreerobotics/xr_teleoperate/blob/main/teleop/robot_control/robot_arm.py):
+all 14 arm joints at zero, within 0.05 rad per joint. The test refuses activation
+outside that tolerance; it does not move the arms to home automatically. The
+measured pose at activation becomes the fixed session center. Regular action mode
+can hold the elbows bent, so it does not imply this zero pose. The command above
+explicitly uses `arm_test_start_pose=current` to hold that existing posture instead;
+it performs no homing motion and retains the same small travel and speed limits.
+
+Start with controllers anywhere and type `r` then Enter on the laptop to arm
+pickup. The terminal immediately prints `Start to get picked up`. If initial
+head/controller tracking is unavailable, pickup stays armed and reports which
+poses are missing; wake the controllers and enter VR with Play. Directional
+guidance begins automatically when tracking becomes valid. No positions are
+inferred from untracked controllers. Move both mapped VR hands within **5 cm** of the robot's starting wrist
+positions; every two seconds the terminal reports each distance and guidance such
+as `Left hand: 12.0 cm away; move up 12.0 cm`. Directions are head-relative:
+forward means away from you, left/right follow your facing direction, and up/down
+are vertical. Keep facing forward while aligning. A hand within tolerance is
+marked `READY`; keep it still while aligning the other hand. Loop status and
+repeated slow-loop warnings are limited to once every five seconds. This compares the
+head-relative VR mapping with robot-model wrist positions, not physical distance
+between the operator and robot. No motor publisher opens before pickup succeeds.
+
+At pickup, the targets hold the measured arm pose without a jump, and arm authority
+blends in over at least five seconds. The **robot speaker** says **“Robot starts to
+follow”** once following starts successfully. Speech uses Unitree's English TTS API
+in a separate worker; audio errors are logged without blocking motor updates.
+The speaker also announces pickup start, hand-position guidance, missing tracking,
+pauses, and activation failures. Guidance and tracking reminders repeat at most
+once every ten seconds. Spoken guidance selects only the hand and direction with
+the largest gap, without speaking distances; the terminal retains all directions
+and distances. Pending prompts are replaced
+rather than queued up.
+`--robot.arm_test_voice=false` disables speech. The audible cue is best-effort and
+does not certify safe motion. No volume settings are changed.
+
+Move one controller slightly, then return it to its starting
+position. Controller translation is scaled by 0.2; rotation and joystick locomotion
+are ignored in this profile. Moving a controller outside the bounded workspace
+saturates its target at the boundary instead of raising a range error. Text and
+voice guidance ask you to bring the controller back to pick up the robot arm.
+This works throughout the session: returning inside resumes movement without
+another `r`, without moving the original workspace or controller anchors.
+The robot approaches the bounded target at the configured slow speed. Hardware
+faults (including posture, stale feedback, velocity and torque limits) still stop
+the session; target saturation does not bypass these checks.
+`p` then Enter holds the measured pose; another `r`
+requires pickup near the held wrist positions again without expanding the original
+session envelope. After following has started, tracking loss pauses following
+and requires another `r`. `p` cancels initial pickup as well. `q` then Enter exits and releases
+arm authority to Unitree; release is not a guaranteed physical stop or a homing move.
+
+| Limit | Default small workspace profile |
+| --- | --- |
+| Commanded joint speed | At most 0.02 rad/s (1.15°/s) |
+| Commanded joint acceleration | At most 0.05 rad/s² |
+| VR joint target offset | At most ±0.025 rad from session center |
+| SDK joint displacement trip | 0.03 rad from activation pose |
+| VR wrist target radius | 20 mm from starting wrist position |
+| SDK wrist displacement trip | 25 mm, including tracking margin |
+
+The SDK independently checks measured and commanded displacement, feedback freshness,
+tracking error, torso tilt, and estimated torque. These are software bounds, not
+collision avoidance or hard physical stops. Keep the workspace clear and the
+independent stop available. Legs, waist, hands, and locomotion are not commanded.
+
+The profile defaults to the gains in Unitree's
+[`g1_arm7_sdk_dds_example.py`](https://github.com/unitreerobotics/unitree_sdk2_python/blob/master/example/g1/high_level/g1_arm7_sdk_dds_example.py)
+(`kp=60`, `kd=1.5`) and software torque-trip thresholds of the smaller of 15 Nm and
+each joint's model effort limit. These thresholds do not clamp firmware torque.
+The existing `arm_sdk` options can supply reviewed gains and torque thresholds;
+speed, acceleration, and travel overrides cannot widen the small profile's caps.
+The observed `mode_machine` byte is locked for the session unless explicitly
+configured; it does not verify that the operator selected regular action mode.
+
+To select a larger workspace with a countdown instead of hand-position pickup,
+replace `--robot.arm_test_workspace=small` with
+`--robot.arm_test_workspace=front_box` in the command above, keeping
+`--robot.arm_test_start_pose=current`. The box is one metre on each side in the
+fixed robot-model frame: x (forward) from 0 to 1 m, y (left) from -0.5 to 0.5 m,
+and z (up) from -0.5 to 0.5 m. These are model coordinates, not heights above the
+floor. Starting wrists must already be inside the box. The small profile's
+joint-offset and wrist-radius limits are replaced by the model's joint limits
+and this box; speed remains at most 0.02 rad/s and acceleration 0.05 rad/s².
+
+The front-box profile is the default when `arm_test=true` and no workspace is
+specified. `r` then Enter announces “Robot start tracking in 5 second”. After five
+seconds with valid tracking available, the initial target holds the measured
+wrists, then approaches the mapped VR hand positions at the slow speed limit.
+You do not need to align your hands with the robot before starting. Positions
+use the existing head-relative VR mapping; wrist orientation stays fixed. Requested
+positions are clipped to the box. Unreachable IK requests hold the last target.
+If a requested wrist is more than 10 cm from measured feedback, the robot says
+“Lost track. Slow down.”, at most once every ten seconds, while continuing slowly
+toward the bounded target. Tracking loss instead pauses following and requires
+another `r`; `p` cancels the countdown or holds, and `q` exits. The box does not
+guarantee reachability or collision avoidance. The existing posture, torque,
+feedback and tracking-error guards still apply.
+
+For operation without the bounded profile, configure the physical parameters
+explicitly as follows.
 
 Use the observed, approved mode as `G1_MODE_MACHINE`. Set `ARM_KP`, `ARM_KD`, and
 `ARM_TORQUE_LIMITS` to reviewed JSON lists of 14 positive values, ordered left arm

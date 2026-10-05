@@ -194,8 +194,9 @@ def teleop_loop(
     # Teleoperation writes no dataset, so a missed deadline costs control smoothness
     # only.  The live readout below is the instantaneous rate; the timer adds the
     # warning when the loop cannot keep up and the summary of where the time went.
-    timer = CycleTimer(fps, records_data=False)
+    timer = CycleTimer(fps, records_data=False, warning_interval_s=5.0)
     start = time.perf_counter()
+    last_status = start
     try:
         while True:
             timer.tick()
@@ -246,8 +247,12 @@ def teleop_loop(
 
             timer.wait()
             loop_s = time.perf_counter() - loop_start
-            print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
-            move_cursor_up(1)
+            if display_data:
+                print(f"Teleop loop time: {loop_s * 1e3:.2f}ms ({1 / loop_s:.0f} Hz)")
+                move_cursor_up(1)
+            elif time.perf_counter() - last_status >= 5.0:
+                logging.info("Teleop loop time: %.2f ms (%.0f Hz)", loop_s * 1e3, 1 / loop_s)
+                last_status = time.perf_counter()
 
             if duration is not None and time.perf_counter() - start >= duration:
                 return

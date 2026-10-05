@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import logging
+import math
 import time
 from collections.abc import Callable, Iterator
 
@@ -207,11 +208,16 @@ class CycleTimer:
         multiplier: int = 1,
         records_data: bool = True,
         report: Callable[[str], None] | None = None,
+        warning_interval_s: float = 0.0,
     ) -> None:
         if fps <= 0:
             raise ValueError(f"fps must be > 0, got {fps}")
         if multiplier < 1:
             raise ValueError(f"multiplier must be >= 1, got {multiplier}")
+        if not math.isfinite(warning_interval_s) or warning_interval_s < 0:
+            raise ValueError("warning_interval_s must be finite and nonnegative")
+        self.warning_interval_s = warning_interval_s
+        self._last_warning_at = -math.inf
         self.fps = fps
         self.multiplier = multiplier
         self.tick_interval = 1.0 / (fps * multiplier)
@@ -404,11 +410,13 @@ class CycleTimer:
                         if self.records_data
                         else "Robot control might be unstable."
                     )
-                    logger.warning(
-                        f"Control loop is running slower ({1 / group_work:.1f} Hz) than the target FPS "
-                        f"({self.fps:g} Hz). {consequence} Common causes are: 1) Camera FPS not keeping up "
-                        "2) Policy inference (action or text) taking too long 3) CPU starvation"
-                    )
+                    if now - self._last_warning_at >= self.warning_interval_s:
+                        logger.warning(
+                            f"Control loop is running slower ({1 / group_work:.1f} Hz) than the target FPS "
+                            f"({self.fps:g} Hz). {consequence} Common causes are: 1) Camera FPS not keeping up "
+                            "2) Policy inference (action or text) taking too long 3) CPU starvation"
+                        )
+                        self._last_warning_at = now
         # A late tick that did not blow the cycle budget costs only interpolation
         # smoothness, so it is a DEBUG note — and at multiplier 1 there is no
         # smoothness to lose, the warning above is the whole story.  Group-closing

@@ -14,6 +14,7 @@ class XRControllersConfig(TeleoperatorConfig):
     full_input: bool = False
     terminal_control: bool = False
     replay_path: str | None = None
+    record_path: str | None = None
     video_channel: str | None = None
     video_source: str = "g1-29-simulation"
     video_openxr_composition: bool = True

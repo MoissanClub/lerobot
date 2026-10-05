@@ -27,6 +27,7 @@ from .g1_arm_sdk import G1ArmSDK, G1ArmSDKConfig
 from .g1_base_motion import G1BaseMotion
 from .g1_safety_contract import digest, model_limits, validate_arm_model, validate_contract
 from .g1_utils import G1_29_JointIndex
+from .g1_voice import G1FollowingVoice
 from .g1_vr_assets import resolve_g1_vr_assets
 from .g1_vr_control import ARM_KEYS, G1VRKinematics
 from .g1_vr_processor import CONTROL_KEYS
@@ -45,9 +46,25 @@ class UnitreeG1MotionConfig(RobotConfig):
     report_path: str | None = None
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     arm_sdk: G1ArmSDKConfig | None = None
+    arm_test: bool = False
+    arm_test_workspace: str = "auto"
+    arm_test_start_pose: str = "zero"
+    arm_test_voice: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.arm_test_workspace == "auto":
+            self.arm_test_workspace = "front_box" if self.arm_test else "small"
+        if self.arm_test_workspace not in ("small", "front_box"):
+            raise ValueError("arm_test_workspace must be small or front_box")
+        if self.arm_test_workspace != "small" and not self.arm_test:
+            raise ValueError("front_box requires arm_test=true")
+        if self.arm_test_start_pose not in ("zero", "current"):
+            raise ValueError("arm_test_start_pose must be zero or current")
+        if self.arm_test_start_pose != "zero" and not self.arm_test:
+            raise ValueError("arm_test_start_pose=current requires arm_test=true")
+        if self.arm_test and (self.mode not in ("arms", "shadow") or self.arm_sdk is None or self.contract):
+            raise ValueError("arm_test requires direct arm_sdk configuration in arms or shadow mode")
         if self.mode not in ("camera", "simulation", "shadow", "arms", "walk", "combined"):
             raise ValueError("Unknown G1 motion mode")
         if self.contract and self.arm_sdk is not None:
@@ -71,7 +88,7 @@ class UnitreeG1MotionConfig(RobotConfig):
             raise ValueError("Only walk/combined require enable_locomotion=true")
         if self.mode not in ("simulation", "camera") and not self.contract and self.arm_sdk is None:
             raise ValueError("Physical feedback/control requires robot.arm_sdk or a legacy contract")
-        if self.mode == "arms" and self.arm_sdk is not None:
+        if self.mode == "arms" and self.arm_sdk is not None and not self.arm_test:
             if self.arm_sdk.expected_mode_machine is None:
                 raise ValueError("Arm motion requires an explicit arm_sdk.expected_mode_machine")
             for name in ("kp", "kd", "torque_limits"):
@@ -97,6 +114,7 @@ class UnitreeG1Motion(Robot):
         self.cameras: dict[str, Camera] = {}
         self._camera_read_started = 0
         self._camera_timed_out = False
+        self.voice: G1FollowingVoice | None = None
 
     @property
     def action_features(self) -> dict:
@@ -126,6 +144,7 @@ class UnitreeG1Motion(Robot):
 
     def _record(self, **row) -> None:
         if self.report:
+            row["recorded_at"] = time.monotonic()
             self.report.write(json.dumps(row, allow_nan=False) + "\n")
             self.report.flush()
 
@@ -141,7 +160,10 @@ class UnitreeG1Motion(Robot):
             if self.config.report_path:
                 self.report = self._stack.enter_context(Path(self.config.report_path).open("x"))  # noqa: SIM115
             self._record(
-                event="starting", mode=self.config.mode, hardware_acceptance="pending_operator_review"
+                event="starting",
+                mode=self.config.mode,
+                hardware_acceptance="pending_operator_review",
+                arm_joint_names=list(ARM_KEYS),
             )
             if self.config.mode == "camera":
                 self.cameras = make_cameras_from_configs(self.config.cameras)
@@ -195,7 +217,31 @@ class UnitreeG1Motion(Robot):
                 )
                 self._stack.callback(self.arm.close)
                 self.arm.connect()
+                if self.config.arm_test and self.config.mode == "arms" and self.config.arm_test_voice:
+                    self.voice = G1FollowingVoice()
+                if self.config.arm_test and self.arm.config.expected_mode_machine is None:
+                    # This locks the observed hardware byte; it is not an action-mode detector.
+                    self.arm.config.expected_mode_machine = self.arm.mode[0]
+                    self.arm_config.expected_mode_machine = self.arm.mode[0]
                 logging.info("G1 hardware mode (mode_machine, mode_pr): %s", self.arm.mode)
+                if self.config.arm_test:
+                    logging.info(
+                        "Arm test starting reference: %s. Bounds remain centered on the activation pose.",
+                        self.config.arm_test_start_pose,
+                    )
+                    logging.warning(
+                        "Bounded arm test: regular action mode must be selected by the operator. "
+                        "Joint travel <= %.3f rad; speed <= %.3f rad/s; wrist radius=%s m; workspace=%s. "
+                        "kp=%s kd=%s torque trip thresholds=%s. "
+                        "r arms pickup, p holds, q releases to stock.",
+                        self.arm_config.max_displacement,
+                        self.arm_config.max_velocity,
+                        self.arm_config.max_wrist_displacement,
+                        self.config.arm_test_workspace,
+                        self.arm_config.kp,
+                        self.arm_config.kd,
+                        self.arm_config.torque_limits,
+                    )
                 if self.config.enable_locomotion:
                     self.base = G1BaseMotion(
                         self._base_feedback, domain_id=self.arm_config.domain_id, **doc["base_limits"]
@@ -211,12 +257,38 @@ class UnitreeG1Motion(Robot):
         cfg = self.config.arm_sdk
         if cfg is None:
             raise ValueError("Missing robot.arm_sdk configuration")
-        if self.config.mode == "shadow":
+        if self.config.mode == "shadow" and not self.config.arm_test:
             return replace(cfg, read_only=True)
         limits = model_limits(urdf)
+        if self.config.arm_test:
+            # Gains from Unitree's g1_arm7_sdk_dds_example.py. Torque values are
+            # software trip thresholds, not hardware torque saturation settings.
+            cfg = replace(
+                cfg,
+                kp=cfg.kp or [60.0] * 14,
+                kd=cfg.kd or [1.5] * 14,
+                torque_limits=cfg.torque_limits or [min(15.0, v) for v in limits["effort"]],
+                max_velocity=min(cfg.max_velocity, 0.02),
+                max_acceleration=min(cfg.max_acceleration, 0.05),
+                max_displacement=min(cfg.max_displacement, 0.03),
+                max_wrist_displacement=min(cfg.max_wrist_displacement or 0.025, 0.025),
+                max_measured_velocity=min(cfg.max_measured_velocity, 0.1),
+                max_tracking_error=min(cfg.max_tracking_error, 0.03),
+                blend_s=max(cfg.blend_s, 5.0),
+                start_position=[0.0] * 14 if self.config.arm_test_start_pose == "zero" else [],
+                start_tolerance=min(cfg.start_tolerance, 0.05),
+            )
+        if self.config.arm_test and self.config.arm_test_workspace == "front_box":
+            cfg = replace(
+                cfg,
+                max_displacement=float(np.max(np.array(limits["upper"]) - limits["lower"])),
+                max_wrist_displacement=None,
+                workspace_lower=[0.0, -0.5, -0.5],
+                workspace_upper=[1.0, 0.5, 0.5],
+            )
         cfg = replace(
             cfg,
-            read_only=False,
+            read_only=self.config.mode == "shadow",
             lower=cfg.lower or limits["lower"],
             upper=cfg.upper or limits["upper"],
             gravity_urdf=cfg.gravity_urdf or str(urdf),
@@ -293,7 +365,12 @@ class UnitreeG1Motion(Robot):
                 measured = np.array([observation[k] for k in ARM_KEYS])
                 if max(abs(q - measured)) > self.arm_config.max_displacement:
                     raise ValueError("Initial action exceeds reviewed displacement")
-                self.arm.activate()
+                try:
+                    self.arm.activate()
+                except (RuntimeError, ValueError):
+                    if self.voice is not None:
+                        self.voice.say("Arm activation blocked. Check the terminal for the reason.")
+                    raise
             if self.arm.active:
                 self.arm.send(dict(zip(ARM_KEYS, q.tolist(), strict=True)))
             if enabled and self.base and self.base.thread is None:
@@ -303,17 +380,23 @@ class UnitreeG1Motion(Robot):
         observation = self.sim.observation() if self.sim else self.arm.observation()
         self._record(
             event="action",
+            created_at=action["control.created_at"],
             enabled=enabled,
             target=q.tolist(),
             velocity=velocity.tolist(),
             motor_publication=bool(self.arm and self.arm.active),
             base_rpc=bool(self.base and self.base.thread),
             measured=[observation[k] for k in ARM_KEYS],
+            observation=observation,
         )
+        if self.voice is not None:
+            self.voice.update(enabled and bool(self.arm and self.arm.active))
         return action.copy()
 
     def disconnect(self) -> None:
         self._connected = False
+        if self.voice is not None:
+            self.voice.update(False)
         stack, self._stack = self._stack, None
         if stack:
             try:
@@ -323,3 +406,6 @@ class UnitreeG1Motion(Robot):
                     stack.close()
                 finally:
                     self.report = None
+                    if self.voice is not None:
+                        self.voice.close()
+                        self.voice = None

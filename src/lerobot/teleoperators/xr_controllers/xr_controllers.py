@@ -201,6 +201,7 @@ class XRControllers(Teleoperator):
     def __init__(self, config, *, session_factory=IsaacControllerSession):
         self._backend = None
         self._cleanup = None
+        self._record_stream = None
         super().__init__(config)
         self.config, self._factory = config, session_factory
 
@@ -267,6 +268,8 @@ class XRControllers(Teleoperator):
             raise RuntimeError("Already connected")
         cleanup = ExitStack()
         try:
+            if self.config.record_path:
+                self._record_stream = cleanup.enter_context(open(self.config.record_path, "x"))  # noqa: SIM115
             if self.config.cloudxr_config:
                 from isaacteleop.cloudxr import CloudXRLauncher
 
@@ -283,6 +286,7 @@ class XRControllers(Teleoperator):
             self._connect_backend(cleanup)
         except BaseException:
             cleanup.close()
+            self._record_stream = None
             raise
         self._cleanup = cleanup
 
@@ -321,6 +325,13 @@ class XRControllers(Teleoperator):
                 command = "quit"
             if command:
                 action[f"control.{command}"] = True
+        if self._record_stream is not None:
+            row = {
+                key: value.tolist() if isinstance(value, np.ndarray) else value
+                for key, value in action.items()
+            }
+            self._record_stream.write(json.dumps(row, allow_nan=False) + "\n")
+            self._record_stream.flush()
         return action
 
     def send_feedback(self, feedback):
@@ -331,6 +342,7 @@ class XRControllers(Teleoperator):
 
     def disconnect(self):
         self._backend = None
+        self._record_stream = None
         cleanup, self._cleanup = self._cleanup, None
         if cleanup is not None:
             cleanup.close()

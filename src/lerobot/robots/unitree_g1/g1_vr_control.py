@@ -21,6 +21,10 @@ MODEL_REVISION = "68459ed68f6f68e1f661091dfcb6ebce44681aec"
 POLICY_REVISION = "7bb8a672f5a4213c9261ea5ac1f3f034f5078638"
 
 
+class XRTrackingUnavailableError(ValueError):
+    """A fresh XR sample has no valid head or controller tracking pose."""
+
+
 def stop_buttons(sample: dict, *, now: float | None = None, max_age: float = 0.25) -> tuple[bool, bool]:
     """Fresh stop buttons remain usable when pose tracking is invalid."""
     now = time.monotonic() if now is None else now
@@ -54,7 +58,7 @@ def map_input(sample: dict, *, now: float | None = None, max_age: float = 0.25) 
     if not np.isfinite(stamp) or not 0 <= now - stamp <= max_age:
         raise ValueError("Stale/future XR input")
     if not all(sample.get(f"{s}.tracked", False) for s in ("head", "left", "right")):
-        raise ValueError("Head or controller tracking lost")
+        raise XRTrackingUnavailableError("Head or controller tracking lost")
     head = pose(sample["head.pos"], sample["head.quat"])
     forward = head[:3, 0].copy()
     forward[2] = 0

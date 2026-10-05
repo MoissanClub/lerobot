@@ -56,6 +56,17 @@ def _drive(timer, clock, work=0.0, ticks=1, new_cycle=True):
         timer.wait()
 
 
+def test_warning_throttle_preserves_overrun_statistics(caplog, clock):
+    timer = CycleTimer(10, warning_interval_s=5.0)
+    _drive(timer, clock, work=0.2, ticks=10)
+    assert len(_timer_warnings(caplog)) == 1
+    assert timer._window.groups_over == 9
+    clock.advance(5)
+    _drive(timer, clock, work=0.2)
+    assert len(_timer_warnings(caplog)) == 2
+    assert timer._window.groups_over == 10
+
+
 # ---------------------------------------------------------------------------
 # Pacing and per-tick telemetry
 # ---------------------------------------------------------------------------
