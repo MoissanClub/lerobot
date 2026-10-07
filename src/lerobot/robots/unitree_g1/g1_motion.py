@@ -24,10 +24,11 @@ from lerobot.robots.config import RobotConfig
 from lerobot.robots.robot import Robot
 
 from .g1_arm_sdk import G1ArmSDK, G1ArmSDKConfig
+from .g1_arm_unitree import UnitreeArmSDK
 from .g1_base_motion import G1BaseMotion
 from .g1_safety_contract import digest, model_limits, validate_arm_model, validate_contract
 from .g1_utils import G1_29_JointIndex
-from .g1_voice import G1FollowingVoice
+from .g1_voice import G1FollowingVoice, make_audio_client
 from .g1_vr_assets import resolve_g1_vr_assets
 from .g1_vr_control import ARM_KEYS, G1VRKinematics
 from .g1_vr_processor import CONTROL_KEYS
@@ -46,13 +47,23 @@ class UnitreeG1MotionConfig(RobotConfig):
     report_path: str | None = None
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     arm_sdk: G1ArmSDKConfig | None = None
+    arm_controller: str = "guarded"
     arm_test: bool = False
     arm_test_workspace: str = "auto"
     arm_test_start_pose: str = "zero"
     arm_test_voice: bool = True
+    arm_test_sync_distance_m: float = 0.1
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        if self.arm_controller not in ("guarded", "unitree"):
+            raise ValueError("arm_controller must be guarded or unitree")
+        if self.arm_controller == "unitree" and (
+            self.mode != "arms" or self.arm_sdk is None or self.arm_test or self.contract
+        ):
+            raise ValueError("unitree controller requires direct arms mode without arm_test or contract")
+        if not np.isfinite(self.arm_test_sync_distance_m) or self.arm_test_sync_distance_m <= 0:
+            raise ValueError("arm_test_sync_distance_m must be positive and finite")
         if self.arm_test_workspace == "auto":
             self.arm_test_workspace = "front_box" if self.arm_test else "small"
         if self.arm_test_workspace not in ("small", "front_box"):
@@ -88,7 +99,12 @@ class UnitreeG1MotionConfig(RobotConfig):
             raise ValueError("Only walk/combined require enable_locomotion=true")
         if self.mode not in ("simulation", "camera") and not self.contract and self.arm_sdk is None:
             raise ValueError("Physical feedback/control requires robot.arm_sdk or a legacy contract")
-        if self.mode == "arms" and self.arm_sdk is not None and not self.arm_test:
+        if (
+            self.mode == "arms"
+            and self.arm_sdk is not None
+            and not self.arm_test
+            and self.arm_controller != "unitree"
+        ):
             if self.arm_sdk.expected_mode_machine is None:
                 raise ValueError("Arm motion requires an explicit arm_sdk.expected_mode_machine")
             for name in ("kp", "kd", "torque_limits"):
@@ -120,13 +136,19 @@ class UnitreeG1Motion(Robot):
     def action_features(self) -> dict:
         if self.config.mode == "camera":
             return {"control.quit": bool}
-        return dict.fromkeys((*ARM_KEYS, *CONTROL_KEYS), float)
+        features = dict.fromkeys((*ARM_KEYS, *CONTROL_KEYS), float)
+        if self.config.arm_controller == "unitree":
+            features["control.resume_generation"] = float
+        return features
 
     @property
     def observation_features(self) -> dict:
         if self.config.mode == "camera":
             return {name: (cfg.height, cfg.width, 3) for name, cfg in self.config.cameras.items()}
-        return {f"{j.name}.{field}": float for j in G1_29_JointIndex for field in ("q", "dq", "tau")}
+        features = {f"{j.name}.{field}": float for j in G1_29_JointIndex for field in ("q", "dq", "tau")}
+        if self.config.arm_controller == "unitree":
+            features.update({"arm.hold_generation": float, "arm.command_hold": float})
+        return features
 
     @property
     def is_connected(self) -> bool:
@@ -212,18 +234,46 @@ class UnitreeG1Motion(Robot):
                             raise ValueError(f"Unreviewed locomotion: {flag}")
                     if set(doc.get("base_limits", {})) != {"max_speed", "max_yaw", "timeout"}:
                         raise ValueError("Reviewed base_limits required")
-                self.arm = G1ArmSDK(
+                arm_class = UnitreeArmSDK if self.config.arm_controller == "unitree" else G1ArmSDK
+                self.arm = arm_class(
                     replace(self.arm_config, read_only=self.config.mode in ("shadow", "walk"))
                 )
                 self._stack.callback(self.arm.close)
+                audio_client = None
+                if self.config.arm_controller == "unitree" and self.config.arm_test_voice:
+                    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+
+                    ChannelFactoryInitialize(self.arm_config.domain_id, self.arm_config.network_interface)
+                    audio_client = make_audio_client()
+                    code, _ = audio_client.GetVolume()
+                    if code:
+                        logging.warning("Robot speaker preflight returned SDK status %s", code)
                 self.arm.connect()
-                if self.config.arm_test and self.config.mode == "arms" and self.config.arm_test_voice:
-                    self.voice = G1FollowingVoice()
-                if self.config.arm_test and self.arm.config.expected_mode_machine is None:
+                if (
+                    (self.config.arm_test or self.config.arm_controller == "unitree")
+                    and self.config.mode == "arms"
+                    and self.config.arm_test_voice
+                ):
+                    self.voice = (
+                        G1FollowingVoice(lambda: audio_client) if audio_client else G1FollowingVoice()
+                    )
+                if (
+                    self.config.arm_test or self.config.arm_controller == "unitree"
+                ) and self.arm.config.expected_mode_machine is None:
                     # This locks the observed hardware byte; it is not an action-mode detector.
                     self.arm.config.expected_mode_machine = self.arm.mode[0]
                     self.arm_config.expected_mode_machine = self.arm.mode[0]
                 logging.info("G1 hardware mode (mode_machine, mode_pr): %s", self.arm.mode)
+                if self.config.arm_controller == "unitree":
+                    logging.warning(
+                        "Unitree arm controller: initializing toward zero joint angles without VR."
+                    )
+                    if self.voice:
+                        self.voice.say(
+                            "Robot arms will move to the initial position in five seconds. Keep clear."
+                        )
+                    time.sleep(5.0)
+                    self.arm.activate()
                 if self.config.arm_test:
                     logging.info(
                         "Arm test starting reference: %s. Bounds remain centered on the activation pose.",
@@ -231,9 +281,10 @@ class UnitreeG1Motion(Robot):
                     )
                     logging.warning(
                         "Bounded arm test: regular action mode must be selected by the operator. "
-                        "Joint travel <= %.3f rad; speed <= %.3f rad/s; wrist radius=%s m; workspace=%s. "
+                        "Joint travel <= %.3f rad; command clipping parameter=%.3f rad/s; "
+                        "wrist radius=%s m; workspace=%s. "
                         "kp=%s kd=%s torque trip thresholds=%s. "
-                        "r arms pickup, p holds, q releases to stock.",
+                        "%s",
                         self.arm_config.max_displacement,
                         self.arm_config.max_velocity,
                         self.arm_config.max_wrist_displacement,
@@ -241,6 +292,11 @@ class UnitreeG1Motion(Robot):
                         self.arm_config.kp,
                         self.arm_config.kd,
                         self.arm_config.torque_limits,
+                        (
+                            "r raises arms without VR, p holds, q lowers and quits."
+                            if self.config.arm_test_workspace == "front_box"
+                            else "r arms pickup, p holds, q releases to stock."
+                        ),
                     )
                 if self.config.enable_locomotion:
                     self.base = G1BaseMotion(
@@ -260,6 +316,25 @@ class UnitreeG1Motion(Robot):
         if self.config.mode == "shadow" and not self.config.arm_test:
             return replace(cfg, read_only=True)
         limits = model_limits(urdf)
+        if self.config.arm_controller == "unitree":
+            return replace(
+                cfg,
+                read_only=False,
+                kp=[80.0] * 4 + [40.0] * 3 + [80.0] * 4 + [40.0] * 3,
+                kd=[3.0] * 4 + [1.5] * 3 + [3.0] * 4 + [1.5] * 3,
+                lower=limits["lower"],
+                upper=limits["upper"],
+                torque_limits=limits["effort"],
+                gravity_urdf=str(urdf),
+                period_s=1 / 250,
+                max_velocity=30.0,
+                ramp_authority=False,
+                measured_target_clipping=True,
+                start_position=[],
+                workspace_lower=[],
+                workspace_upper=[],
+                max_wrist_displacement=None,
+            )
         if self.config.arm_test:
             # Gains from Unitree's g1_arm7_sdk_dds_example.py. Torque values are
             # software trip thresholds, not hardware torque saturation settings.
@@ -281,9 +356,16 @@ class UnitreeG1Motion(Robot):
         if self.config.arm_test and self.config.arm_test_workspace == "front_box":
             cfg = replace(
                 cfg,
+                ramp_authority=False,
+                measured_target_clipping=True,
+                max_velocity=30.0,
+                max_preparation_velocity=self.config.arm_sdk.max_preparation_velocity or 0.5,
+                period_s=1.0 / 250.0,
+                kp=self.config.arm_sdk.kp or [80.0] * 4 + [40.0] * 3 + [80.0] * 4 + [40.0] * 3,
+                kd=self.config.arm_sdk.kd or [3.0] * 4 + [1.5] * 3 + [3.0] * 4 + [1.5] * 3,
                 max_displacement=float(np.max(np.array(limits["upper"]) - limits["lower"])),
                 max_wrist_displacement=None,
-                workspace_lower=[0.0, -0.5, -0.5],
+                workspace_lower=[-0.02, -0.5, -0.5],
                 workspace_upper=[1.0, 0.5, 0.5],
             )
         cfg = replace(
@@ -343,7 +425,14 @@ class UnitreeG1Motion(Robot):
             raise ValueError("G1 motion requires the complete processed action contract")
         if not 0 <= time.monotonic() - action["control.created_at"] <= 0.25:
             raise ValueError("Stale/future processed command")
-        for key in ("control.enabled", "control.live", "control.stop", "control.damp"):
+        for key in (
+            "control.enabled",
+            "control.following",
+            "control.preparing",
+            "control.live",
+            "control.stop",
+            "control.damp",
+        ):
             if action[key] not in (0.0, 1.0):
                 raise ValueError(f"Invalid boolean control field: {key}")
         if action["control.stop"] or action["control.damp"]:
@@ -372,7 +461,21 @@ class UnitreeG1Motion(Robot):
                         self.voice.say("Arm activation blocked. Check the terminal for the reason.")
                     raise
             if self.arm.active:
-                self.arm.send(dict(zip(ARM_KEYS, q.tolist(), strict=True)))
+                resume = {}
+                if self.config.arm_controller == "unitree":
+                    token = action["control.resume_generation"]
+                    if token < -1 or int(token) != token:
+                        raise ValueError("Invalid resume generation")
+                    if token >= 0 and not action["control.following"]:
+                        raise ValueError("Resume requires valid following targets")
+                    resume = {"resume_generation": None if token < 0 else int(token)}
+                accepted = self.arm.send(
+                    dict(zip(ARM_KEYS, q.tolist(), strict=True)),
+                    use_feedforward=not bool(action["control.preparing"]),
+                    **resume,
+                )
+                if self.config.arm_controller == "unitree":
+                    q = np.array([accepted[k] for k in ARM_KEYS])
             if enabled and self.base and self.base.thread is None:
                 self.base.activate()
             if self.base and self.base.thread is not None:
@@ -382,6 +485,8 @@ class UnitreeG1Motion(Robot):
             event="action",
             created_at=action["control.created_at"],
             enabled=enabled,
+            following=bool(action["control.following"])
+            and not bool(observation.get("arm.command_hold", False)),
             target=q.tolist(),
             velocity=velocity.tolist(),
             motor_publication=bool(self.arm and self.arm.active),
@@ -390,13 +495,27 @@ class UnitreeG1Motion(Robot):
             observation=observation,
         )
         if self.voice is not None:
-            self.voice.update(enabled and bool(self.arm and self.arm.active))
-        return action.copy()
+            self.voice.update(
+                enabled
+                and bool(action["control.following"])
+                and bool(self.arm and self.arm.active)
+                and not bool(observation.get("arm.command_hold", False))
+            )
+        sent = action.copy()
+        if self.config.arm_controller == "unitree":
+            sent.update(zip(ARM_KEYS, q.tolist(), strict=True))
+            sent["control.following"] = float(
+                bool(action["control.following"]) and not bool(observation.get("arm.command_hold", False))
+            )
+        return sent
 
     def disconnect(self) -> None:
         self._connected = False
         if self.voice is not None:
             self.voice.update(False)
+            if self.config.arm_controller == "unitree" and self.arm and self.arm.active:
+                logging.info("Lowering arms and quitting. Keep clear.")
+                self.voice.say("Lowering arms and quitting. Keep clear.")
         stack, self._stack = self._stack, None
         if stack:
             try:

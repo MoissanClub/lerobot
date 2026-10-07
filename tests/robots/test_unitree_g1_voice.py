@@ -2,10 +2,27 @@
 # Licensed under the Apache License, Version 2.0. See LICENSE in the project root.
 """Voice tests use fake clients; no DDS or audible speech."""
 
+import logging
 import threading
 from unittest.mock import Mock
 
 from lerobot.robots.unitree_g1.g1_voice import G1FollowingVoice
+
+
+def test_status_voice_throttled_but_fault_is_immediate():
+    from lerobot.robots.unitree_g1.g1_voice import _PromptHandler
+
+    voice = Mock()
+    handler = _PromptHandler(voice)
+    record = logging.LogRecord("root", logging.INFO, "g1_vr_processor.py", 1, "status", (), None)
+    record.teleop_voice = "Left controller tracked."
+    handler.emit(record)
+    handler.emit(record)
+    voice.say.assert_called_once_with("Left controller tracked.")
+    record.levelno = logging.ERROR
+    record.teleop_voice = "Arm control fault. Releasing. Check the terminal."
+    handler.emit(record)
+    assert voice.say.call_count == 2
 
 
 def test_voice_is_nonblocking_and_deduplicates_following_updates():
@@ -115,3 +132,29 @@ def test_operator_prompt_filter_and_guidance_throttle(monkeypatch):
     assert voice.say.call_count == 2  # Only confirmed activation announces following.
     emit("XR tracking paused: lost")
     assert "Tracking lost" in voice.say.call_args.args[0]
+
+
+def test_ready_warning_is_forwarded_to_speaker():
+    import logging
+
+    from lerobot.robots.unitree_g1.g1_voice import _PromptHandler
+
+    voice = Mock()
+    handler = _PromptHandler(voice)
+    message = "Robot arms will rise to the ready position in five seconds. Keep clear."
+    handler.emit(logging.LogRecord("root", logging.INFO, "g1_vr_front_box.py", 1, message, (), None))
+    voice.say.assert_called_once_with(message)
+
+
+def test_lost_track_announces_even_just_after_sync_countdown(monkeypatch):
+    import logging
+
+    from lerobot.robots.unitree_g1.g1_voice import _PromptHandler
+
+    voice = Mock()
+    handler = _PromptHandler(voice)
+    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_voice.time.monotonic", lambda: 100.0)
+    for message in ("Hold and start tracking in 3, 2, 1.", "Lost track."):
+        handler.emit(logging.LogRecord("root", logging.INFO, "g1_vr_front_box.py", 1, message, (), None))
+    assert voice.say.call_count == 2
+    voice.say.assert_called_with("Lost track.")

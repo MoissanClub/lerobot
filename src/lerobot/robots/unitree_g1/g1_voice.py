@@ -15,9 +15,28 @@ def make_audio_client() -> Any:
     from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
 
     client = AudioClient()
-    client.SetTimeout(1.0)
+    client.SetTimeout(5.0)
     client.Init()
+    # SDK versions that double tts_index leave a zero seed at zero forever.
+    # A nonzero seed gives successive utterances distinct indexes.
+    client.tts_index = 1
     return client
+
+
+def concise_prompt(message: str) -> str:
+    for prefix, spoken in (
+        ("Robot arms will move to the initial", "Initializing in five seconds."),
+        ("Robot arms will rise", "Raising in five seconds."),
+        ("Ready position reached", "Ready."),
+        ("Ready pose held", "Ready."),
+        ("Lowering arms and quitting", "Lowering. Exiting."),
+        ("Hold and start tracking", "Hold. Three, two, one."),
+        ("Arm motion paused", "Paused."),
+        ("Start to get picked up", "Align controllers."),
+    ):
+        if message.startswith(prefix):
+            return spoken
+    return message
 
 
 class _PromptHandler(logging.Handler):
@@ -30,11 +49,31 @@ class _PromptHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if record.module not in ("g1_vr_processor", "g1_vr_front_box"):
+        if record.module not in ("g1_vr_processor", "g1_vr_front_box", "g1_arm_unitree"):
             return
         now = time.monotonic()
-        if message == "Robot start tracking in 5 second":
+        if prompt := getattr(record, "teleop_voice", None):
+            # State logs are immediate; spoken status never builds a queue.
+            if record.levelno >= logging.ERROR or now - self.last_guidance >= 10.0:
+                self.last_guidance = now
+                self.voice.say(prompt)
+            return
+        if message.startswith(
+            (
+                "Robot arms will rise",
+                "Ready pose held.",
+                "Lowering arms and quitting",
+                "Hold and start tracking",
+                "Arm motion paused.",
+            )
+        ):
             self.last_guidance = now
+            self.voice.say(message)
+        elif message.startswith("VR controllers unavailable"):
+            if now - self.last_guidance >= 10.0:
+                self.last_guidance = now
+                self.voice.say("Please connect and wake both VR controllers.")
+        elif message == "Lost track.":
             self.voice.say(message)
         elif message == "Lost track. Slow down.":
             if now - self.last_guidance >= 10.0:
@@ -117,6 +156,7 @@ class G1FollowingVoice:
 
     def say(self, message: str) -> None:
         """Replace pending guidance with the latest prompt; never block control."""
+        message = concise_prompt(message)
         with self._lock:
             if not self._stop.is_set():
                 self._queue(message, prompt=True)

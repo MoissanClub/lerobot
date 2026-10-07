@@ -25,6 +25,19 @@ class XRTrackingUnavailableError(ValueError):
     """A fresh XR sample has no valid head or controller tracking pose."""
 
 
+class XRStaleInputError(ValueError):
+    """An otherwise usable XR sample has exceeded its freshness budget."""
+
+
+def validate_xr_timestamp(stamp: float, *, now: float | None = None, max_age: float = 0.25) -> None:
+    """Separate recoverable stale tracking from invalid or future timestamps."""
+    now = time.monotonic() if now is None else now
+    if not np.isfinite(stamp) or stamp > now:
+        raise ValueError("Invalid/future XR timestamp")
+    if now - stamp > max_age:
+        raise XRStaleInputError("Stale XR input")
+
+
 def stop_buttons(sample: dict, *, now: float | None = None, max_age: float = 0.25) -> tuple[bool, bool]:
     """Fresh stop buttons remain usable when pose tracking is invalid."""
     now = time.monotonic() if now is None else now
@@ -55,8 +68,7 @@ def map_input(sample: dict, *, now: float | None = None, max_age: float = 0.25) 
     """
     now = time.monotonic() if now is None else now
     stamp = float(sample["captured_at"])
-    if not np.isfinite(stamp) or not 0 <= now - stamp <= max_age:
-        raise ValueError("Stale/future XR input")
+    validate_xr_timestamp(stamp, now=now, max_age=max_age)
     if not all(sample.get(f"{s}.tracked", False) for s in ("head", "left", "right")):
         raise XRTrackingUnavailableError("Head or controller tracking lost")
     head = pose(sample["head.pos"], sample["head.quat"])
@@ -130,8 +142,10 @@ class G1VRKinematics:
             self.to_motor
         ].copy()
 
-    def solve(self, wrists, measured: np.ndarray, max_step: float = 0.04) -> tuple[np.ndarray, np.ndarray]:
-        if not np.isfinite(max_step) or max_step <= 0:
+    def solve(
+        self, wrists, measured: np.ndarray, max_step: float | None = 0.04
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if max_step is not None and (not np.isfinite(max_step) or max_step <= 0):
             raise ValueError("IK step bound must be positive and finite")
         if len(wrists) != 2 or any(np.asarray(w).shape != (4, 4) or not np.isfinite(w).all() for w in wrists):
             raise ValueError("IK requires two finite homogeneous wrist poses")
@@ -146,7 +160,11 @@ class G1VRKinematics:
         candidate = np.asarray(candidate, dtype=float)[self.to_motor]
         if not np.isfinite(candidate).all():
             raise RuntimeError("Nonfinite upstream IK result")
-        target = np.clip(q + np.clip(candidate - q, -max_step, max_step), self.lower, self.upper)
+        target = np.clip(
+            candidate if max_step is None else q + np.clip(candidate - q, -max_step, max_step),
+            self.lower,
+            self.upper,
+        )
         return target, self.gravity(target)
 
 

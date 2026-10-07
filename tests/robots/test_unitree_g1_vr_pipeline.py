@@ -381,3 +381,31 @@ def test_fk_outside_workspace_projects_to_boundary_without_error(monkeypatch):
         assert result["control.enabled"] == 1
         assert result[ARM_KEYS[0]] == pytest.approx(0.01, abs=1e-7)
         assert result[ARM_KEYS[7]] == 0
+
+
+@pytest.mark.parametrize("following", [False, True])
+def test_motor_authority_alone_does_not_announce_vr_following(following):
+    robot = UnitreeG1Motion(
+        UnitreeG1MotionConfig(
+            mode="arms",
+            enable_motion=True,
+            arm_test=True,
+            arm_sdk=G1ArmSDKConfig(network_interface="robot-test"),
+        )
+    )
+    robot._connected = True
+    robot.arm = Mock(active=True)
+    robot.arm.observation.return_value = dict.fromkeys(ARM_KEYS, 0.0)
+    robot._record = Mock()
+    robot.voice = Mock()
+    action = dict.fromkeys(robot.action_features, 0.0)
+    action.update(
+        {
+            "control.enabled": 1.0,
+            "control.following": float(following),
+            "control.live": 1.0,
+            "control.created_at": time.monotonic(),
+        }
+    )
+    robot.send_action(action)
+    robot.voice.update.assert_called_once_with(following)

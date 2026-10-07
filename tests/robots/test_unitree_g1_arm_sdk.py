@@ -3,6 +3,7 @@
 """Offline physical-backend tests: never initialize DDS or contact a robot."""
 
 import copy
+import os
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,6 +23,7 @@ from lerobot.robots.unitree_g1.g1_arm_sdk import (
 def configuration(**kwargs):
     settings = {
         "network_interface": "robot-test",
+        "domain_id": 1_000_000 + os.getpid(),  # Mock transport, isolated from the live robot lease.
         "read_only": False,
         "expected_mode_machine": 5,
         "kp": [30.0] * 14,
@@ -111,6 +113,20 @@ def test_readonly_lifecycle_has_no_writer():
     with pytest.raises(RuntimeError):
         robot.connect()
     assert io.writers == 0 and not io.commands
+
+
+def test_inactive_feedback_gap_can_recover_without_enabling_motion():
+    now = [1.0]
+    io = FakeTransport()
+    robot = G1ArmSDK(configuration(read_only=True), transport=io, clock=lambda: now[0])
+    robot.connect()
+    now[0] += 1.0
+    with pytest.raises(RuntimeError, match="stale"):
+        robot.observation()
+    robot._receive(state(2))
+    assert robot.observation() and robot.fault is None
+    assert not robot.writer and not io.commands
+    robot.close()
 
 
 def test_explicit_motion_gains_required():
@@ -237,6 +253,77 @@ def test_measured_envelope_faults(backend, field, value):
         robot._step()
 
 
+def test_velocity_fault_identifies_joint_and_takeover_weight(backend):
+    robot, _, now = backend
+    msg = state(2)
+    msg.motor_state[18].dq = -1.99
+    robot.weight = 0.052
+    now[0] += 0.02
+    robot._receive(msg)
+    with pytest.raises(RuntimeError, match=r"kLeftElbow=-1.9900 rad/s, limit=.*blend=0.052"):
+        robot._step()
+
+
+def test_full_authority_still_holds_measured_pose_and_limits_trajectory(backend):
+    robot, io, now = backend
+    robot.config.ramp_authority = False
+    now[0] += 0.02
+    robot._receive(state(2))
+    robot._step()
+    assert io.commands[-1].motor_cmd[29].q == 1.0
+    np.testing.assert_allclose(robot.previous, robot.initial)
+    robot.target = robot.initial + 0.01
+    now[0] += 0.02
+    robot._receive(state(3))
+    robot._step()
+    assert io.commands[-1].motor_cmd[29].q == 1.0
+    assert np.max(np.abs(robot.previous - robot.initial)) <= robot.config.max_acceleration * 0.02**2
+
+
+@pytest.mark.parametrize("velocity_limit", [0.02, 30.0])
+def test_unitree_clipping_uses_measured_pose_shared_scale_and_zero_startup_torque(backend, velocity_limit):
+    robot, io, now = backend
+    robot.config.measured_target_clipping = True
+    robot.config.ramp_authority = False
+    robot.config.period_s = 1 / 250
+    robot.config.max_velocity = velocity_limit
+    robot.use_feedforward = False
+    robot.gravity = SimpleNamespace(gravity=lambda _: np.ones(14))
+    msg = state(2)
+    msg.motor_state[15].q = 0.01
+    msg.motor_state[16].q = 0.005
+    robot.target = np.zeros(14)
+    now[0] += robot.config.period_s
+    robot._receive(msg)
+    robot._step()
+    command = io.commands[-1]
+    assert command.motor_cmd[29].q == 1
+    step = min(0.01, velocity_limit / 250)
+    assert command.motor_cmd[15].q == pytest.approx(0.01 - step)
+    assert command.motor_cmd[16].q == pytest.approx(0.005 - step / 2)
+    assert all(command.motor_cmd[s].tau == 0 for s in ARM_SLOTS)
+    assert all(command.motor_cmd[s].dq == 0 for s in ARM_SLOTS)
+
+
+def test_preparation_velocity_ceiling_does_not_widen_following_limit(backend):
+    robot, _, now = backend
+    robot.config.max_measured_velocity = 0.1
+    robot.config.max_preparation_velocity = 0.5
+    robot.use_feedforward = False
+    msg = state(2)
+    msg.motor_state[15].dq = 0.23
+    now[0] += 0.02
+    robot._receive(msg)
+    robot._check_state(msg)
+    robot.use_feedforward = True
+    with pytest.raises(RuntimeError, match="limit=0.1000"):
+        robot._check_state(msg)
+    robot.use_feedforward = False
+    msg.motor_state[15].dq = 0.51
+    with pytest.raises(RuntimeError, match="limit=0.5000"):
+        robot._check_state(msg)
+
+
 def test_sdk_transport_topics_and_bounded_write_without_dds():
     from unittest.mock import MagicMock
 
@@ -257,7 +344,7 @@ def test_sdk_transport_topics_and_bounded_write_without_dds():
             pass
 
         io.connect(cfg, callback)
-        initialize.assert_called_once_with(0, "robot-test")
+        initialize.assert_called_once_with(cfg.domain_id, "robot-test")
         assert sub.call_args.args[0] == "rt/lowstate"
         pub.assert_not_called()
         io.enable_writer()

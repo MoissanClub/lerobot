@@ -34,8 +34,12 @@ class G1ArmSDKConfig:
     state_timeout_s: float = 5.0
     max_state_age_s: float = 0.1
     command_timeout_s: float = 0.1
+    # Unitree reference profile: release after a prolonged caller outage.
+    command_fault_timeout_s: float = 1.0
     period_s: float = 0.02
     blend_s: float = 2.0
+    ramp_authority: bool = True
+    measured_target_clipping: bool = False
     max_velocity: float = 0.1
     max_acceleration: float = 0.5
     max_displacement: float = 0.05
@@ -46,6 +50,7 @@ class G1ArmSDKConfig:
     start_tolerance: float = 0.05
     max_tracking_error: float = 0.1
     max_measured_velocity: float = 0.5
+    max_preparation_velocity: float | None = None
     max_feedforward: float = 5.0
     max_tilt_rad: float = 0.05
     gravity_urdf: str | None = None
@@ -58,6 +63,10 @@ class G1ArmSDKConfig:
     def __post_init__(self):
         if not isinstance(self.read_only, bool):
             raise ValueError("read_only must be boolean")
+        if not isinstance(self.ramp_authority, bool):
+            raise ValueError("ramp_authority must be boolean")
+        if not isinstance(self.measured_target_clipping, bool):
+            raise ValueError("measured_target_clipping must be boolean")
         if not self.network_interface or self.network_interface == "lo":
             raise ValueError("Arm SDK requires an explicit non-loopback interface")
         if isinstance(self.domain_id, bool) or not isinstance(self.domain_id, int) or self.domain_id < 0:
@@ -70,6 +79,7 @@ class G1ArmSDKConfig:
             "state_timeout_s",
             "max_state_age_s",
             "command_timeout_s",
+            "command_fault_timeout_s",
             "period_s",
             "blend_s",
             "max_velocity",
@@ -90,6 +100,10 @@ class G1ArmSDKConfig:
             not math.isfinite(self.max_wrist_displacement) or self.max_wrist_displacement <= 0
         ):
             raise ValueError("max_wrist_displacement must be positive and finite")
+        if self.max_preparation_velocity is not None and (
+            not math.isfinite(self.max_preparation_velocity) or self.max_preparation_velocity <= 0
+        ):
+            raise ValueError("max_preparation_velocity must be positive and finite")
         if (self.workspace_lower or self.workspace_upper) and (
             len(self.workspace_lower) != 3
             or len(self.workspace_upper) != 3
@@ -184,6 +198,12 @@ class G1ArmSDK:
         self.transport = transport if transport is not None else ArmSDKTransport()
         self.clock = clock
         self.lock = threading.RLock()
+        # Lock order is command lock -> feedback lock. The callback only takes
+        # feedback_lock, so holding the command lock cannot block the callback.
+        self.feedback_lock = threading.RLock()
+        self.feedback_count = 0
+        self.max_feedback_gap_s = 0.0
+        self.max_feedback_lock_wait_s = 0.0
         self.stop = threading.Event()
         self.thread = None
         self.state = None
@@ -196,14 +216,18 @@ class G1ArmSDK:
         self.active = False
         self.writer = False
         self.weight = 0.0
+        self.use_feedforward = not config.measured_target_clipping
         self.gravity = None
         self.release_sent = False
         self.lease = None
 
     def _receive(self, msg):
-        with self.lock:
+        received_at = self.clock()
+        with self.feedback_lock:
             if self.stop.is_set():
                 return
+            lock_wait = self.clock() - received_at
+            self.max_feedback_lock_wait_s = max(self.max_feedback_lock_wait_s, lock_wait)
             try:
                 values = np.array([(m.q, m.dq, m.tau_est) for m in msg.motor_state[:29]])
                 if values.shape != (29, 3) or not np.isfinite(values).all():
@@ -220,20 +244,36 @@ class G1ArmSDK:
                         return  # Repeated snapshots cannot refresh feedback freshness.
                     if delta > 2**31:
                         raise ValueError("Robot tick regressed")
-                if self.state_at is not None and self.clock() - self.state_at > self.config.max_state_age_s:
-                    raise ValueError("Feedback receive gap exceeded")
-                self.state, self.state_at, self.tick, self.mode = copy.deepcopy(msg), self.clock(), tick, mode
+                gap = 0.0 if self.state_at is None else received_at - self.state_at
+                self.max_feedback_gap_s = max(self.max_feedback_gap_s, gap)
+                if self.active and gap > self.config.max_state_age_s:
+                    raise ValueError(
+                        "Feedback receive gap exceeded: "
+                        f"callback gap={gap * 1000:.1f} ms, lock wait={lock_wait * 1000:.1f} ms, "
+                        f"limit={self.config.max_state_age_s * 1000:.1f} ms"
+                    )
+                self.state, self.state_at, self.tick, self.mode = (
+                    self._copy_state(msg),
+                    received_at,
+                    tick,
+                    mode,
+                )
+                self.feedback_count += 1
             except Exception as exc:
                 self.fault = str(exc)
 
     def _snapshot(self):
-        if self.fault:
-            raise RuntimeError(self.fault)
-        if self.state_at is None or not 0 <= self.clock() - self.state_at <= self.config.max_state_age_s:
-            raise RuntimeError("Missing or stale feedback")
-        if self.config.lower:
-            self._check_pose(self._q(self.state))
-        return copy.deepcopy(self.state)
+        with self.feedback_lock:
+            if self.fault:
+                raise RuntimeError(self.fault)
+            if self.state_at is None or not 0 <= self.clock() - self.state_at <= self.config.max_state_age_s:
+                raise RuntimeError("Missing or stale feedback")
+            if self.config.lower:
+                self._check_pose(self._q(self.state))
+            return self._copy_state(self.state)
+
+    def _copy_state(self, state):
+        return copy.deepcopy(state)
 
     def connect(self):
         if self.used:
@@ -319,10 +359,17 @@ class G1ArmSDK:
             self.transport.wait_ready(
                 arm_command(self.initial, np.zeros(14), 0.0, state.mode_machine, self.config)
             )
+            # DDS endpoint discovery may briefly delay callbacks. No active
+            # command has been sent; wait for fresh feedback before takeover.
+            deadline = self.clock() + self.config.state_timeout_s
+            while self.state_at is None or self.clock() - self.state_at > self.config.max_state_age_s:
+                if self.fault or self.clock() >= deadline:
+                    raise RuntimeError(self.fault or "Timed out waiting for fresh activation feedback")
+                time.sleep(0.002)
             with self.lock:
                 state = self._snapshot()
                 self.initial = self._q(state)
-                self.target = self.initial.copy()
+                self.target = self._activation_target(self.initial)
                 self.previous = self.initial.copy()
                 self._check_state(state)
                 self.last_command = self.clock()
@@ -340,6 +387,9 @@ class G1ArmSDK:
     def _q(state):
         return np.array([state.motor_state[slot].q for slot in ARM_SLOTS])
 
+    def _activation_target(self, measured: np.ndarray) -> np.ndarray:
+        return measured.copy()
+
     def _check_pose(self, q):
         if np.any(q < self.config.lower) or np.any(q > self.config.upper):
             raise ValueError("Arm target exceeds configured bounds")
@@ -350,8 +400,19 @@ class G1ArmSDK:
         if np.max(np.abs(q - self.initial)) > self.config.max_displacement:
             raise RuntimeError("Measured displacement limit exceeded")
         self._check_wrist_displacement(q)
-        if max(abs(state.motor_state[s].dq) for s in ARM_SLOTS) > self.config.max_measured_velocity:
-            raise RuntimeError("Measured arm velocity limit exceeded")
+        fastest = max(ARM_JOINTS, key=lambda joint: abs(state.motor_state[joint.value].dq))
+        measured_velocity = state.motor_state[fastest.value].dq
+        velocity_limit = (
+            self.config.max_preparation_velocity
+            if not self.use_feedforward and self.config.max_preparation_velocity is not None
+            else self.config.max_measured_velocity
+        )
+        if abs(measured_velocity) > velocity_limit:
+            raise RuntimeError(
+                "Measured arm velocity limit exceeded: "
+                f"{fastest.name}={measured_velocity:.4f} rad/s, "
+                f"limit={velocity_limit:.4f} rad/s, blend={self.weight:.3f}"
+            )
         if np.max(np.abs(q - self.previous)) > self.config.max_tracking_error:
             raise RuntimeError("Tracking error limit exceeded")
         if (
@@ -381,11 +442,16 @@ class G1ArmSDK:
 
     def _check_wrist_displacement(self, q: np.ndarray) -> None:
         if self.config.workspace_lower:
-            for wrist in self.gravity.fk(q):
+            for side, wrist in zip(("left", "right"), self.gravity.fk(q), strict=True):
                 if np.any(wrist[:3, 3] < self.config.workspace_lower) or np.any(
                     wrist[:3, 3] > self.config.workspace_upper
                 ):
-                    raise RuntimeError("Robot wrist outside configured Cartesian workspace")
+                    raise RuntimeError(
+                        "Robot wrist outside configured Cartesian workspace: "
+                        f"{side} xyz={wrist[:3, 3].round(4).tolist()}, "
+                        f"lower={self.config.workspace_lower}, upper={self.config.workspace_upper}, "
+                        f"blend={self.weight:.3f}"
+                    )
         if self.config.max_wrist_displacement is None:
             return
         origin = self.gravity.fk(self.initial)
@@ -396,7 +462,7 @@ class G1ArmSDK:
         ):
             raise RuntimeError("Wrist displacement limit exceeded")
 
-    def send(self, action):
+    def send(self, action, *, use_feedforward: bool = True):
         with self.lock:
             if not self.active or self.fault:
                 raise RuntimeError(self.fault or "Arm authority not explicitly activated")
@@ -412,6 +478,7 @@ class G1ArmSDK:
                     raise ValueError("Requested displacement limit exceeded")
                 self._check_wrist_displacement(q)
                 self.target = q
+                self.use_feedforward = use_feedforward
                 self.last_command = self.clock()
             except Exception as exc:
                 self.fault = str(exc)
@@ -438,11 +505,23 @@ class G1ArmSDK:
                 desired - self.velocity, -self.config.max_acceleration * dt, self.config.max_acceleration * dt
             )
             command = self.previous + velocity * dt
+            if self.config.measured_target_clipping:
+                # Same proportional, measured-position-relative clipping as
+                # G1_29_ArmController.clip_arm_q_target (all axes share a scale).
+                delta = self.target - q
+                scale = max(
+                    float(np.max(np.abs(delta))) / (self.config.max_velocity * self.config.period_s), 1.0
+                )
+                command = q + delta / scale
             self._check_pose(command)
             if np.max(np.abs(command - self.initial)) > self.config.max_displacement:
                 raise RuntimeError("Slew-limited displacement limit exceeded")
             self._check_wrist_displacement(command)
-            tau = np.zeros(14) if self.gravity is None else self.gravity.gravity(command)
+            tau = (
+                np.zeros(14)
+                if self.gravity is None or not self.use_feedforward
+                else self.gravity.gravity(command)
+            )
             if not np.isfinite(tau).all() or np.max(np.abs(tau)) > self.config.max_feedforward:
                 raise RuntimeError("Invalid or excessive gravity feedforward")
             dq = np.array([state.motor_state[s].dq for s in ARM_SLOTS])
@@ -452,7 +531,11 @@ class G1ArmSDK:
                 for i, s in enumerate(ARM_SLOTS)
             ):
                 raise RuntimeError("Estimated arm torque limit exceeded")
-            self.weight = min(1.0, self.weight + dt / self.config.blend_s)
+            # Unitree's arm SDK motion-mode controller takes full authority;
+            # trajectory speed is bounded independently of this protocol weight.
+            self.weight = (
+                min(1.0, self.weight + dt / self.config.blend_s) if self.config.ramp_authority else 1.0
+            )
             self.transport.write(arm_command(command, tau, self.weight, state.mode_machine, self.config))
             self.previous, self.velocity, self.last_step = command, velocity, now
 
@@ -464,19 +547,23 @@ class G1ArmSDK:
             with self.lock:
                 self.fault = str(exc)
         finally:
-            with self.lock:
-                self.active = False
-                self.stop.set()
-                # Explicitly selected release-to-stock contract, not a verified physical stop.
+            self._release_authority()
+
+    def _release_authority(self) -> None:
+        with self.lock:
+            self.active = False
+            self.stop.set()
+            # Release to stock is not a verified physical stop.
+            self.release_sent = False
+            for _ in range(3):
                 try:
-                    for _ in range(3):
-                        self.transport.write(
-                            arm_command(self.previous, np.zeros(14), 0.0, self.mode[0], self.config)
-                        )
-                        time.sleep(self.config.period_s)
+                    self.transport.write(
+                        arm_command(self.previous, np.zeros(14), 0.0, self.mode[0], self.config)
+                    )
                     self.release_sent = True
                 except Exception as exc:
                     self.fault = f"{self.fault or 'Shutdown'}; release write failed: {exc}"
+                time.sleep(self.config.period_s)
 
     def close(self):
         self.stop.set()

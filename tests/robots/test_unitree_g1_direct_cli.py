@@ -194,11 +194,38 @@ def test_front_box_profile_retains_slow_limits_and_selects_countdown(tmp_path, m
     )
     robot = g1_motion.UnitreeG1Motion(cfg)
     sdk = robot._direct_arm_config(tmp_path / "robot.urdf")
-    assert sdk.max_velocity == 0.02
+    assert sdk.max_velocity == 30.0
     assert sdk.max_acceleration == 0.05
     assert sdk.max_wrist_displacement is None
-    assert sdk.workspace_lower == [0, -0.5, -0.5]
+    assert sdk.workspace_lower == [-0.02, -0.5, -0.5]
+    assert not sdk.ramp_authority
+    assert sdk.measured_target_clipping
+    assert sdk.period_s == 1 / 250
+    assert sdk.kp == [80.0] * 4 + [40.0] * 3 + [80.0] * 4 + [40.0] * 3
+    assert sdk.kd == [3.0] * 4 + [1.5] * 3 + [3.0] * 4 + [1.5] * 3
     assert sdk.workspace_upper == [1, 0.5, 0.5]
     assert sdk.max_displacement == 4.0
     processors = make_default_processors(robot_config=cfg, teleop_config=XRControllersConfig(full_input=True))
     assert processors[0].steps[0].workspace == "front_box"
+
+
+def test_cli_sync_distance_reaches_processor_and_serialized_config(monkeypatch):
+    monkeypatch.setattr(g1_vr_processor, "resolve_g1_vr_assets", lambda _: "/model")
+    monkeypatch.setattr(g1_vr_processor, "G1VRKinematics", Mock())
+    cfg = draccus.parse(
+        TeleoperateConfig,
+        args=[
+            "--robot.type=unitree_g1_motion",
+            "--robot.mode=arms",
+            "--robot.arm_test=true",
+            "--robot.enable_motion=true",
+            "--robot.arm_sdk.network_interface=robot_eth",
+            "--robot.arm_test_sync_distance_m=0.15",
+            "--teleop.type=xr_controllers",
+            "--teleop.full_input=true",
+        ],
+    )
+    processor = make_default_processors(robot_config=cfg.robot, teleop_config=cfg.teleop)[0].steps[0]
+    assert processor.front_box.sync_distance_m == 0.15
+    assert processor.front_box.unsync_distance_m == pytest.approx(0.18)
+    assert processor.get_config()["sync_distance_m"] == 0.15
