@@ -156,13 +156,18 @@ class IsaacControllerSession:
             )
             head = result["head"]
             if fresh and head is not None and not getattr(head, "is_none", False):
-                action.update(
-                    {
+                try:
+                    candidate = {
                         "head.tracked": bool(head[HeadPoseIndex.IS_VALID]),
                         "head.pos": np.asarray(head[HeadPoseIndex.POSITION]),
                         "head.quat": np.asarray(head[HeadPoseIndex.ORIENTATION]),
                     }
-                )
+                    if candidate["head.pos"].size == 3 and candidate["head.quat"].size == 4:
+                        candidate["head.pos"] = candidate["head.pos"].reshape(3)
+                        candidate["head.quat"] = candidate["head.quat"].reshape(4)
+                        action.update(candidate)
+                except (KeyError, IndexError, TypeError, ValueError):
+                    pass
         return action
 
     def close(self):

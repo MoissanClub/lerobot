@@ -42,6 +42,11 @@ def test_full_input_reads_head_sticks_and_untracked_stop_buttons():
     controller[C.GRIP_IS_VALID] = True
     action = session.read()
     assert action["left.stick_y"] == 0.4 and action["left.trigger"] == 0.3
+    head[H.POSITION] = None
+    action = session.read()
+    assert not action["head.tracked"]
+    np.testing.assert_array_equal(action["head.pos"], np.zeros(3))
+    np.testing.assert_array_equal(action["head.quat"], [0.0, 0.0, 0.0, 1.0])
     session.session.last_step_info = SimpleNamespace(worker_exception=None, frame_deadline_miss=True)
     action = session.read()
     assert not action["head.tracked"] and not action["right.primary"]

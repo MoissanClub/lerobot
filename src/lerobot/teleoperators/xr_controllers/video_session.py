@@ -1,20 +1,21 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # Licensed under the Apache License, Version 2.0. See LICENSE in the project root.
-"""Isolated shared input/video OpenXR session with a bounded controller mailbox."""
+"""Isolated shared input/video OpenXR session with latest-value controller storage."""
 
 import multiprocessing as mp
 import queue
 import time
 import traceback
-from contextlib import ExitStack, suppress
+from contextlib import ExitStack
 
 import numpy as np
 
 from .camera_display import CameraDisplay
+from .latest_slot import LatestSlot
 from .xr_controllers import IsaacControllerSession
 
 
-def video_worker(config, video, frames, stop, ready, errors):
+def video_worker(config, video, latest, stop, ready, errors):
     try:
         from isaacteleop.oxr import OpenXRSessionHandles
         from isaacteleop.teleop_session_manager import get_required_oxr_extensions_from_pipeline
@@ -34,9 +35,7 @@ def video_worker(config, video, frames, stop, ready, errors):
                 display.update_camera()
                 display.render()
                 sample = reader.read()
-                # A full mailbox drops frames instead of blocking.
-                with suppress(queue.Full):
-                    frames.put_nowait(sample)
+                latest.write(sample)
                 stop.wait(max(0, 1 / 90 - (time.monotonic() - started)))
     except BaseException:
         if not stop.is_set():
@@ -52,17 +51,19 @@ class VideoControllerSession:
         self.timeout = startup_timeout
         self.process = None
         self.snapshot = None
+        self.latest = None
 
     def connect(self):
         if self.process is not None:
             raise RuntimeError("Already connected")
         context = mp.get_context("spawn")
-        self.frames, self.errors = context.Queue(1), context.Queue(1)
+        self.latest = LatestSlot(context, bool(getattr(self.config, "full_input", False)))
+        self.errors = context.Queue(1)
         self.stop, ready = context.Event(), context.Event()
         self.snapshot = None
         self.process = context.Process(
             target=self.worker,
-            args=(self.config, self.video, self.frames, self.stop, ready, self.errors),
+            args=(self.config, self.video, self.latest, self.stop, ready, self.errors),
             name="lerobot-xr-video",
         )
         try:
@@ -87,8 +88,9 @@ class VideoControllerSession:
         if self.process is None:
             raise RuntimeError("Not connected")
         self._check_error()
-        with suppress(queue.Empty):
-            self.snapshot = self.frames.get_nowait()
+        sample = self.latest.read()
+        if sample is not None:
+            self.snapshot = sample
         # Preserve acquisition time: a cached frame must never appear newly tracked.
         if self.snapshot is None:
             action = {"captured_at": 0.0}
@@ -121,7 +123,7 @@ class VideoControllerSession:
             if process.is_alive():
                 process.kill()
                 process.join()
-        for channel in (self.frames, self.errors):
-            channel.cancel_join_thread()
-            channel.close()
+        self.errors.cancel_join_thread()
+        self.errors.close()
+        self.latest = None
         self.snapshot = None

@@ -1,13 +1,16 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # Licensed under the Apache License, Version 2.0. See LICENSE in the project root.
+import multiprocessing as mp
 import os
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from lerobot.cameras.frame_channel import FrameWriter, read_frame
 from lerobot.teleoperators.xr_controllers.camera_display import CameraDisplay, VideoConfig
+from lerobot.teleoperators.xr_controllers.latest_slot import LatestSlot
 from lerobot.teleoperators.xr_controllers.video_session import VideoControllerSession
 
 
@@ -67,15 +70,158 @@ def test_bad_payload_and_closed_writer(tmp_path):
         writer.publish(np.zeros((6, 8, 3), dtype=np.uint8), {})
 
 
-def fake_video_worker(config, video, frames, stop, ready, errors):
-    frames.put({"captured_at": 1.0, "left.tracked": True, "right.tracked": True})
+def controller_sample(captured_at, full_input=False):
+    sample = {"captured_at": captured_at}
+    for side, sign in (("left", -1), ("right", 1)):
+        sample.update(
+            {
+                f"{side}.tracked": True,
+                f"{side}.grip_pos": np.array([sign, 2.0, 3.0]),
+                f"{side}.grip_quat": np.array([0.0, 0.0, 0.0, 1.0]),
+                f"{side}.squeeze": 0.25,
+                f"{side}.trigger": 0.75,
+            }
+        )
+        if full_input:
+            sample.update(
+                {
+                    f"{side}.stick_x": 0.1 * sign,
+                    f"{side}.stick_y": 0.2 * sign,
+                    f"{side}.stick_click": side == "left",
+                    f"{side}.primary": side == "right",
+                    f"{side}.secondary": False,
+                }
+            )
+    if full_input:
+        sample.update(
+            {
+                "head.tracked": True,
+                "head.pos": np.array([4.0, 5.0, 6.0]),
+                "head.quat": np.array([0.0, 0.0, 0.0, 1.0]),
+            }
+        )
+    return sample
+
+
+def fake_video_worker(config, video, latest, stop, ready, errors):
+    latest.write(controller_sample(1.0))
     ready.set()
     stop.wait(10)
 
 
-def failed_video_worker(config, video, frames, stop, ready, errors):
+def latest_video_worker(config, video, latest, stop, ready, errors):
+    for sequence in range(1, 101):
+        latest.write(controller_sample(float(sequence), config.full_input))
+    ready.set()
+    stop.wait(10)
+
+
+def concurrent_video_worker(config, video, latest, stop, ready, errors):
+    ready.set()
+    for sequence in range(1, 501):
+        if stop.is_set():
+            return
+        sample = controller_sample(float(sequence), config.full_input)
+        for key, value in sample.items():
+            if key == "captured_at":
+                continue
+            if isinstance(value, np.ndarray):
+                sample[key] = np.full(value.shape, sequence, dtype=np.float64)
+            elif isinstance(value, bool):
+                sample[key] = bool(sequence % 2)
+            else:
+                sample[key] = float(sequence)
+        latest.write(sample)
+        time.sleep(0.0005)
+    stop.wait(10)
+
+
+def failed_video_worker(config, video, latest, stop, ready, errors):
     errors.put("synthetic startup failure")
     ready.set()
+
+
+@pytest.mark.parametrize("full_input", [False, True])
+def test_latest_slot_round_trip(full_input):
+    slot = LatestSlot(mp.get_context("spawn"), full_input)
+    assert slot.read() is None
+    expected = controller_sample(1.5, full_input)
+    slot.write(expected)
+    actual = slot.read()
+    assert actual.keys() == expected.keys()
+    for key in expected:
+        if isinstance(expected[key], np.ndarray):
+            np.testing.assert_array_equal(actual[key], expected[key])
+        else:
+            assert actual[key] == expected[key]
+
+
+def test_latest_slot_rejects_malformed_sample_without_losing_latest():
+    slot = LatestSlot(mp.get_context("spawn"), False)
+    expected = controller_sample(1.5)
+    assert slot.write(expected)
+    malformed = controller_sample(2.0)
+    malformed["left.grip_pos"] = np.zeros(2)
+    with pytest.raises(ValueError, match="left.grip_pos must contain 3 value"):
+        slot.write(malformed)
+    malformed["left.grip_pos"] = np.zeros(3)
+    del malformed["right.trigger"]
+    with pytest.raises(KeyError, match="right.trigger"):
+        slot.write(malformed)
+    assert slot.read()["captured_at"] == expected["captured_at"]
+
+
+def test_latest_slot_lock_timeout_preserves_liveness():
+    slot = LatestSlot(mp.get_context("spawn"), False)
+    assert slot.write(controller_sample(1.0))
+    assert slot.lock.acquire()
+    try:
+        assert slot.read() is None
+        assert not slot.write(controller_sample(2.0))
+    finally:
+        slot.lock.release()
+    assert slot.read()["captured_at"] == 1.0
+
+
+@pytest.mark.parametrize("full_input", [False, True])
+def test_controller_mailbox_keeps_latest_cross_process_sample(full_input):
+    config = SimpleNamespace(full_input=full_input)
+    session = VideoControllerSession(config, None, worker=latest_video_worker, startup_timeout=5)
+    session.connect()
+    try:
+        assert session.read()["captured_at"] == 100.0
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("full_input", [False, True])
+def test_controller_mailbox_is_consistent_during_concurrent_access(full_input):
+    config = SimpleNamespace(full_input=full_input)
+    session = VideoControllerSession(config, None, worker=concurrent_video_worker, startup_timeout=5)
+    session.connect()
+    samples = []
+    deadline = time.monotonic() + 2
+    try:
+        while len(samples) < 50 and time.monotonic() < deadline:
+            sample = session.read()
+            sequence = sample["captured_at"]
+            if not sequence:
+                continue
+            for key, value in sample.items():
+                if key == "captured_at":
+                    continue
+                if isinstance(value, np.ndarray):
+                    np.testing.assert_array_equal(value, np.full(value.shape, sequence))
+                elif isinstance(value, bool):
+                    assert value is bool(int(sequence) % 2)
+                else:
+                    assert value == sequence
+            if not samples or sequence != samples[-1]:
+                assert not samples or sequence > samples[-1]
+                samples.append(sequence)
+    finally:
+        session.close()
+    assert len(samples) >= 50
 
 
 def test_worker_lifecycle_stale_timestamp_and_reconnect():
