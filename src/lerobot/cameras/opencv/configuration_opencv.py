@@ -51,6 +51,8 @@ class OpenCVCameraConfig(CameraConfig):
         warmup_s: Time reading frames before returning from connect (in seconds)
         fourcc: FOURCC code for video format (e.g., "MJPG", "YUYV", "I420"). Defaults to None (auto-detect).
         backend: OpenCV backend identifier (https://docs.opencv.org/3.4/d4/d15/group__videoio__flags__base.html). Defaults to ANY.
+        buffer_size: Requested capture-backend buffer depth. Defaults to None (backend default).
+                     Backends may reject or ignore this best-effort setting.
 
     Note:
         - Only 3-channel color output (RGB/BGR) is currently supported.
@@ -64,6 +66,7 @@ class OpenCVCameraConfig(CameraConfig):
     warmup_s: int = 1
     fourcc: str | None = None
     backend: Cv2Backends = Cv2Backends.ANY
+    buffer_size: int | None = None
 
     def __post_init__(self) -> None:
         self.color_mode = ColorMode(self.color_mode)
@@ -73,4 +76,13 @@ class OpenCVCameraConfig(CameraConfig):
         if self.fourcc is not None and (not isinstance(self.fourcc, str) or len(self.fourcc) != 4):
             raise ValueError(
                 f"`fourcc` must be a 4-character string (e.g., 'MJPG', 'YUYV'), but '{self.fourcc}' is provided."
+            )
+
+        if self.buffer_size is not None and (
+            isinstance(self.buffer_size, bool)
+            or not isinstance(self.buffer_size, int)
+            or self.buffer_size < 1
+        ):
+            raise ValueError(
+                f"`buffer_size` must be a positive integer, but {self.buffer_size!r} is provided."
             )

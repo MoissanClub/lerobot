@@ -122,6 +122,8 @@ class OpenCVCamera(Camera):
 
         self.capture_width: int | None = None
         self.capture_height: int | None = None
+        self.buffer_size_set: bool | None = None
+        self.buffer_size_actual: float | None = None
         self._reset_connection_settings()
 
     def __str__(self) -> str:
@@ -133,6 +135,8 @@ class OpenCVCamera(Camera):
         self.width = self.config.width
         self.height = self.config.height
         self.capture_width, self.capture_height = self.width, self.height
+        self.buffer_size_set = None
+        self.buffer_size_actual = None
         if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
             self.capture_width, self.capture_height = self.height, self.width
 
@@ -217,6 +221,31 @@ class OpenCVCamera(Camera):
 
         if self.videocapture is None:
             raise DeviceNotConnectedError(f"{self} videocapture is not initialized")
+
+        if self.config.buffer_size is not None:
+            try:
+                success = self.videocapture.set(cv2.CAP_PROP_BUFFERSIZE, self.config.buffer_size)
+            except Exception:
+                self.buffer_size_set = False
+                logger.debug(
+                    "%s capture backend raised while requesting buffer_size=%d; continuing with backend default.",
+                    self,
+                    self.config.buffer_size,
+                    exc_info=True,
+                )
+            else:
+                self.buffer_size_set = bool(success)
+                try:
+                    self.buffer_size_actual = self.videocapture.get(cv2.CAP_PROP_BUFFERSIZE)
+                except Exception:
+                    logger.debug("%s could not read back the capture buffer size.", self, exc_info=True)
+                logger.debug(
+                    "%s requested buffer_size=%d (success=%s, actual=%s).",
+                    self,
+                    self.config.buffer_size,
+                    success,
+                    self.buffer_size_actual,
+                )
 
         set_fourcc_after_size_and_fps = platform.system() == "Windows"
         if self.config.fourcc is not None and not set_fourcc_after_size_and_fps:

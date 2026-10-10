@@ -26,7 +26,7 @@ import cv2
 import numpy as np
 import pytest
 
-from lerobot.cameras.configs import ColorMode, Cv2Rotation
+from lerobot.cameras.configs import ColorMode, Cv2Backends, Cv2Rotation
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
@@ -93,6 +93,92 @@ def test_connect():
 
     with OpenCVCamera(config) as camera:
         assert camera.is_connected
+
+
+@pytest.mark.parametrize("buffer_size, behavior", [(None, True), (1, True), (1, False), (1, "raise")])
+def test_connect_configures_optional_buffer_size(buffer_size, behavior, caplog):
+    class Capture:
+        def __init__(self, *_args, **_kwargs):
+            self.properties = []
+            self.opened = True
+            self.values = {
+                cv2.CAP_PROP_FRAME_WIDTH: 160,
+                cv2.CAP_PROP_FRAME_HEIGHT: 120,
+                cv2.CAP_PROP_FPS: 30,
+                cv2.CAP_PROP_BUFFERSIZE: 4,
+            }
+
+        def get(self, property_id):
+            return self.values.get(property_id, 0)
+
+        def isOpened(self):  # noqa: N802 - OpenCV API compatibility
+            return self.opened
+
+        def release(self):
+            self.opened = False
+
+        def set(self, property_id, value):
+            self.properties.append((property_id, value))
+            if property_id == cv2.CAP_PROP_BUFFERSIZE:
+                if behavior == "raise":
+                    raise RuntimeError("unsupported")
+                if behavior:
+                    self.values[property_id] = value
+                return behavior
+            self.values[property_id] = value
+            return True
+
+    module_path = OpenCVCamera.__module__
+    with (
+        patch(f"{module_path}.cv2.VideoCapture", new=Capture),
+        patch.object(OpenCVCamera, "_start_read_thread"),
+        caplog.at_level("DEBUG", logger=module_path),
+    ):
+        camera = OpenCVCamera(
+            OpenCVCameraConfig(index_or_path=0, width=320, height=240, fps=25, buffer_size=buffer_size)
+        )
+        camera.connect(warmup=False)
+
+    assert camera.videocapture is not None
+    configured = [
+        value
+        for property_id, value in camera.videocapture.properties
+        if property_id == cv2.CAP_PROP_BUFFERSIZE
+    ]
+    assert configured == ([] if buffer_size is None else [buffer_size])
+    assert (cv2.CAP_PROP_FRAME_WIDTH, 320.0) in camera.videocapture.properties
+    assert (cv2.CAP_PROP_FRAME_HEIGHT, 240.0) in camera.videocapture.properties
+    assert (cv2.CAP_PROP_FPS, 25.0) in camera.videocapture.properties
+    if buffer_size is None:
+        assert camera.buffer_size_set is camera.buffer_size_actual is None
+    elif behavior == "raise":
+        assert camera.buffer_size_set is False
+        assert camera.buffer_size_actual is None
+        assert "raised while requesting buffer_size=1" in caplog.text
+    else:
+        assert camera.buffer_size_set is behavior
+        assert camera.buffer_size_actual == (1 if behavior else 4)
+        assert f"success={behavior}" in caplog.text
+
+
+@pytest.mark.parametrize("buffer_size", [0, -1, True, 1.0, "1"])
+def test_buffer_size_configuration_rejects_invalid_values(buffer_size):
+    with pytest.raises(ValueError, match="`buffer_size` must be a positive integer"):
+        OpenCVCameraConfig(index_or_path=0, buffer_size=buffer_size)
+
+
+def test_buffer_size_preserves_existing_positional_field_order():
+    config = OpenCVCameraConfig(
+        0,
+        ColorMode.BGR,
+        Cv2Rotation.ROTATE_180,
+        2,
+        "MJPG",
+        Cv2Backends.V4L2,
+    )
+
+    assert config.backend is Cv2Backends.V4L2
+    assert config.buffer_size is None
 
 
 def test_connect_already_connected():

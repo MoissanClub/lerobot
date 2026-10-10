@@ -19,7 +19,7 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="mode", required=True)
     camera = sub.add_parser("camera", help="RGB camera producer only; no DDS or XR")
-    camera.add_argument("--device", required=True, help="OpenCV index, /dev/video path, or test video file")
+    camera.add_argument("--device", required=True, help="OpenCV camera index or /dev/video path")
     camera.add_argument("--width", type=int, default=640)
     camera.add_argument("--height", type=int, default=480)
     camera.add_argument("--fps", type=int, default=30)
@@ -47,25 +47,103 @@ def camera(args, output):
     from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 
     device = int(args.device) if args.device.isdecimal() else Path(args.device)
-    config = OpenCVCameraConfig(index_or_path=device, width=args.width, height=args.height, fps=args.fps)
+    config = OpenCVCameraConfig(
+        index_or_path=device, width=args.width, height=args.height, fps=args.fps, buffer_size=1
+    )
     with ExitStack() as cleanup:
         source = OpenCVCamera(config)
         cleanup.callback(lambda: source.disconnect() if source.is_connected else None)
         source.connect()
+        buffer_size_honored = source.buffer_size_set is True and source.buffer_size_actual == 1
+        record(
+            output,
+            event="camera_config",
+            buffer_size_requested=config.buffer_size,
+            buffer_size_set=source.buffer_size_set,
+            buffer_size_actual=source.buffer_size_actual,
+            buffer_size_honored=buffer_size_honored,
+        )
+        if not buffer_size_honored:
+            print(
+                "Warning: capture backend did not confirm buffer_size=1; frame freshness is unverified",
+                flush=True,
+            )
         writer = FrameWriter(args.channel, args.width, args.height)
         cleanup.callback(writer.close)
         print("Camera capture only: no robot connection or motor publisher", flush=True)
         deadline = time.monotonic() + args.duration_s
-        while time.monotonic() < deadline:
-            started = time.monotonic()
-            # Conservative timestamp before blocking read, never restamp cached frames.
-            captured = time.monotonic_ns()
-            pixels = source.read()
-            published = writer.publish(
-                pixels, {"captured_monotonic_ns": captured, "embodiment": args.source_id}
+        frame_period_ns = 1e9 / args.fps
+        stall_threshold_ns = max(4 * frame_period_ns, 250e6 if buffer_size_honored else 0)
+        minimum_live_wait_ns = frame_period_ns / 2
+        previous_delivery_ns = None
+        draining_backlog = False
+        drain_trigger = None
+        frames_read = frames_published = backlog_frames_dropped = publish_failures = 0
+        try:
+            while time.monotonic() < deadline:
+                read_started = time.monotonic_ns()
+                had_previous_delivery = previous_delivery_ns is not None
+                loop_gap_ns = 0 if previous_delivery_ns is None else read_started - previous_delivery_ns
+                pixels = source.read()
+                captured = time.monotonic_ns()
+                frames_read += 1
+                read_wait_ns = captured - read_started
+                previous_delivery_ns = captured
+                if read_wait_ns > stall_threshold_ns:
+                    draining_backlog = True
+                    drain_trigger = "slow_read"
+                elif had_previous_delivery and read_wait_ns < minimum_live_wait_ns:
+                    draining_backlog = True
+                    drain_trigger = drain_trigger or "fast_read"
+                if draining_backlog and not minimum_live_wait_ns <= read_wait_ns <= stall_threshold_ns:
+                    backlog_frames_dropped += 1
+                    record(
+                        output,
+                        event="camera",
+                        sequence=writer.sequence,
+                        published=False,
+                        dropped_reason="draining_backlog",
+                        drain_trigger=drain_trigger,
+                        read_wait_ms=read_wait_ns / 1e6,
+                        loop_gap_ms=loop_gap_ns / 1e6,
+                    )
+                    continue
+                draining_backlog = False
+                drain_trigger = None
+                # This is OpenCV delivery time, not hardware exposure time. Consequently,
+                # camera_age_ms is a lower bound on the frame's true age.
+                published = writer.publish(
+                    pixels,
+                    {
+                        "captured_monotonic_ns": captured,
+                        "timestamp_semantics": "opencv_delivery",
+                        "embodiment": args.source_id,
+                    },
+                )
+                record(
+                    output,
+                    event="camera",
+                    sequence=writer.sequence,
+                    published=published,
+                    read_wait_ms=read_wait_ns / 1e6,
+                    loop_gap_ms=loop_gap_ns / 1e6,
+                )
+                frames_published += int(published)
+                publish_failures += int(not published)
+        finally:
+            record(
+                output,
+                event="camera_summary",
+                frames_read=frames_read,
+                frames_published=frames_published,
+                backlog_frames_dropped=backlog_frames_dropped,
+                publish_failures=publish_failures,
+                draining_at_exit=draining_backlog,
             )
-            record(output, event="camera", sequence=writer.sequence, published=published)
-            time.sleep(max(0, 1 / args.fps - (time.monotonic() - started)))
+        if not frames_published:
+            raise RuntimeError("No camera frames published")
+        if draining_backlog:
+            raise RuntimeError("Camera ended while draining a capture backlog")
 
 
 def display(args, output):
