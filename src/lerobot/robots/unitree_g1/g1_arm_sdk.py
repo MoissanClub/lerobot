@@ -49,6 +49,7 @@ class G1ArmSDKConfig:
     start_position: list[float] = field(default_factory=list)
     start_tolerance: float = 0.05
     max_tracking_error: float = 0.1
+    max_preparation_tracking_error: float | None = None
     max_measured_velocity: float = 0.5
     max_preparation_velocity: float | None = None
     max_feedforward: float = 5.0
@@ -100,6 +101,10 @@ class G1ArmSDKConfig:
             not math.isfinite(self.max_wrist_displacement) or self.max_wrist_displacement <= 0
         ):
             raise ValueError("max_wrist_displacement must be positive and finite")
+        if self.max_preparation_tracking_error is not None and (
+            not math.isfinite(self.max_preparation_tracking_error) or self.max_preparation_tracking_error <= 0
+        ):
+            raise ValueError("max_preparation_tracking_error must be positive and finite")
         if self.max_preparation_velocity is not None and (
             not math.isfinite(self.max_preparation_velocity) or self.max_preparation_velocity <= 0
         ):
@@ -216,7 +221,8 @@ class G1ArmSDK:
         self.active = False
         self.writer = False
         self.weight = 0.0
-        self.use_feedforward = not config.measured_target_clipping
+        self.use_feedforward = True
+        self.preparing = config.max_preparation_tracking_error is not None
         self.gravity = None
         self.release_sent = False
         self.lease = None
@@ -404,7 +410,7 @@ class G1ArmSDK:
         measured_velocity = state.motor_state[fastest.value].dq
         velocity_limit = (
             self.config.max_preparation_velocity
-            if not self.use_feedforward and self.config.max_preparation_velocity is not None
+            if self.preparing and self.config.max_preparation_velocity is not None
             else self.config.max_measured_velocity
         )
         if abs(measured_velocity) > velocity_limit:
@@ -413,8 +419,19 @@ class G1ArmSDK:
                 f"{fastest.name}={measured_velocity:.4f} rad/s, "
                 f"limit={velocity_limit:.4f} rad/s, blend={self.weight:.3f}"
             )
-        if np.max(np.abs(q - self.previous)) > self.config.max_tracking_error:
-            raise RuntimeError("Tracking error limit exceeded")
+        error_limit = (
+            self.config.max_preparation_tracking_error
+            if self.preparing and self.config.max_preparation_tracking_error is not None
+            else self.config.max_tracking_error
+        )
+        worst = int(np.argmax(np.abs(q - self.previous)))
+        error = float(abs(q[worst] - self.previous[worst]))
+        if error > error_limit:
+            phase = "preparation" if self.preparing else "following/hold"
+            raise RuntimeError(
+                f"Tracking error limit exceeded during {phase}: "
+                f"{ARM_JOINTS[worst].name} error={error:.4f} rad, limit={error_limit:.4f} rad"
+            )
         if (
             self.gravity is not None
             and max(abs(v) for v in state.imu_state.rpy[:2]) > self.config.max_tilt_rad
@@ -462,7 +479,7 @@ class G1ArmSDK:
         ):
             raise RuntimeError("Wrist displacement limit exceeded")
 
-    def send(self, action, *, use_feedforward: bool = True):
+    def send(self, action, *, use_feedforward: bool = True, preparing: bool = False):
         with self.lock:
             if not self.active or self.fault:
                 raise RuntimeError(self.fault or "Arm authority not explicitly activated")
@@ -479,6 +496,7 @@ class G1ArmSDK:
                 self._check_wrist_displacement(q)
                 self.target = q
                 self.use_feedforward = use_feedforward
+                self.preparing = preparing
                 self.last_command = self.clock()
             except Exception as exc:
                 self.fault = str(exc)

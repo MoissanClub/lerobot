@@ -360,6 +360,7 @@ class UnitreeG1Motion(Robot):
                 measured_target_clipping=True,
                 max_velocity=30.0,
                 max_preparation_velocity=self.config.arm_sdk.max_preparation_velocity or 0.5,
+                max_preparation_tracking_error=self.config.arm_sdk.max_preparation_tracking_error or 0.08,
                 period_s=1.0 / 250.0,
                 kp=self.config.arm_sdk.kp or [80.0] * 4 + [40.0] * 3 + [80.0] * 4 + [40.0] * 3,
                 kd=self.config.arm_sdk.kd or [3.0] * 4 + [1.5] * 3 + [3.0] * 4 + [1.5] * 3,
@@ -469,9 +470,12 @@ class UnitreeG1Motion(Robot):
                     if token >= 0 and not action["control.following"]:
                         raise ValueError("Resume requires valid following targets")
                     resume = {"resume_generation": None if token < 0 else int(token)}
+                else:
+                    resume = {"preparing": bool(action["control.preparing"])}
                 accepted = self.arm.send(
                     dict(zip(ARM_KEYS, q.tolist(), strict=True)),
-                    use_feedforward=not bool(action["control.preparing"]),
+                    use_feedforward=self.config.arm_controller != "unitree"
+                    or not bool(action["control.preparing"]),
                     **resume,
                 )
                 if self.config.arm_controller == "unitree":

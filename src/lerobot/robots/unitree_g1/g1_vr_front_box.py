@@ -16,6 +16,8 @@ LOWERED_ARM_Q = np.zeros(14)
 WORKSPACE_LOWER = np.array([0.0, -0.5, -0.5])
 WORKSPACE_UPPER = np.array([1.0, 0.5, 0.5])
 PREPARATION_LOWER = np.array([-0.02, -0.5, -0.5])
+# Allow small PD residuals, while remaining below the 0.03-rad following guard.
+PREPARATION_ARRIVAL_TOLERANCE = 0.025
 
 
 class FrontBoxTracking:
@@ -79,7 +81,8 @@ class FrontBoxTracking:
             1.0, self.motion_progress + 0.02 * dt / max(float(np.max(np.abs(delta))), 1e-9)
         )
         self.target = self.motion_origin + self.motion_progress * delta
-        return self.motion_progress == 1.0 and np.max(np.abs(measured - self.motion_goal)) <= 0.02
+        tolerance = PREPARATION_ARRIVAL_TOLERANCE if self.phase == "initial" else 0.02
+        return self.motion_progress == 1.0 and np.max(np.abs(measured - self.motion_goal)) <= tolerance
 
     def _unsync(self, measured: np.ndarray, *, lost: bool = False) -> None:
         self.phase = "unsynced"

@@ -309,16 +309,16 @@ def test_preparation_velocity_ceiling_does_not_widen_following_limit(backend):
     robot, _, now = backend
     robot.config.max_measured_velocity = 0.1
     robot.config.max_preparation_velocity = 0.5
-    robot.use_feedforward = False
+    robot.preparing = True
     msg = state(2)
     msg.motor_state[15].dq = 0.23
     now[0] += 0.02
     robot._receive(msg)
     robot._check_state(msg)
-    robot.use_feedforward = True
+    robot.preparing = False
     with pytest.raises(RuntimeError, match="limit=0.1000"):
         robot._check_state(msg)
-    robot.use_feedforward = False
+    robot.preparing = True
     msg.motor_state[15].dq = 0.51
     with pytest.raises(RuntimeError, match="limit=0.5000"):
         robot._check_state(msg)
@@ -466,3 +466,25 @@ def test_cartesian_box_is_checked_independently_of_radius(backend):
     wrist[0, 3] = 1.001
     with pytest.raises(RuntimeError, match="Cartesian workspace"):
         robot._check_wrist_displacement(np.zeros(14))
+
+
+def test_preparation_feedforward_and_separate_error_guard(backend):
+    robot, io, now = backend
+    robot.config.max_tracking_error = 0.03
+    robot.config.max_preparation_tracking_error = 0.08
+    robot.config.max_displacement = 0.2
+    robot.gravity = SimpleNamespace(gravity=lambda _: np.ones(14))
+    robot.send(dict.fromkeys(ARM_KEYS, 0.0), preparing=True)
+    now[0] += 0.02
+    msg = state(2)
+    msg.motor_state[ARM_SLOTS[3]].q = 0.04
+    robot._receive(msg)
+    robot._step()
+    assert all(io.commands[-1].motor_cmd[s].tau == 1.0 for s in ARM_SLOTS)
+    robot.send(dict.fromkeys(ARM_KEYS, 0.0), preparing=False)
+    with pytest.raises(RuntimeError, match="following/hold.*limit=0.0300"):
+        robot._check_state(msg)
+    robot.send(dict.fromkeys(ARM_KEYS, 0.0), preparing=True)
+    msg.motor_state[ARM_SLOTS[3]].q = 0.081
+    with pytest.raises(RuntimeError, match="preparation.*limit=0.0800"):
+        robot._check_state(msg)

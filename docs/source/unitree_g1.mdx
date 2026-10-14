@@ -481,6 +481,13 @@ The guarded controller is a separate diagnostic option. Do not combine
 
 These profiles retain their own preparation, pickup and fault behavior; the
 reference controller's automatic recovery table above does not apply to them.
+The guarded front-box profile uses gravity feedforward during preparation and
+following. Preparation allows up to 0.08 rad of joint-position error (configurable
+with `robot.arm_sdk.max_preparation_tracking_error`); following/hold retains the
+0.03 rad limit. Preparation target progression remains limited to 0.02 rad/s; arrival allows
+a residual joint-position error of 0.025 rad.
+The error message identifies the phase, joint, measured error and limit.
+
 In guarded VR tests, `p` or **B+Y held together for one second** pauses while
 retaining arm authority. Headset buttons never request exit or stock-controller
 handback. Press `r` after a manual pause to arm pickup again. Invalid or missing

@@ -385,3 +385,12 @@ def test_camera_status_does_not_pause_tracking(tracking):
     tick(tracking, **{"camera.available": False, "camera.stale": True})
     assert tracker.phase == "synced"
 
+
+@pytest.mark.parametrize("residual,arrived", [(0.0206, True), (0.026, False)])
+def test_preparation_arrival_accepts_small_pd_residual_only(tracking, residual, arrived):
+    tracker, now, q, _ = tracking
+    tracker.motion_goal = np.zeros(14)
+    tracker.motion_origin = np.zeros(14)
+    tracker.motion_progress = 1.0
+    q[5] = residual
+    assert bool(tracker._move(q, now[0], 0.02)) is arrived
