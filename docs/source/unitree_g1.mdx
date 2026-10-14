@@ -481,6 +481,15 @@ The guarded controller is a separate diagnostic option. Do not combine
 
 These profiles retain their own preparation, pickup and fault behavior; the
 reference controller's automatic recovery table above does not apply to them.
+In guarded VR tests, `p` or **B+Y held together for one second** pauses while
+retaining arm authority. Headset buttons never request exit or stock-controller
+handback. Press `r` after a manual pause to arm pickup again. Invalid or missing
+tracking, or samples older than 250 ms, hold the arms; valid input must pass pickup
+before following resumes. A continuous one-second input outage reports lost
+tracking. Camera loss alone does not pause control. The button gesture requires
+fresh samples and is not an emergency-stop guarantee. Robot-feedback faults and
+process shutdown still follow the SDK's separate fault/cleanup policy.
+
 Use `lerobot-teleoperate --help` to inspect configuration options. Saved contracts
 cannot be combined with direct `robot.arm_sdk` settings.
 

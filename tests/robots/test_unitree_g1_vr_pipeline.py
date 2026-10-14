@@ -51,9 +51,9 @@ def test_processor_pause_requires_explicit_restart(monkeypatch):
     sample["control.start"] = True
     assert processor.action(sample)["control.enabled"] == 1
     sample["control.start"] = False
-    sample["head.tracked"] = False
+    sample["control.pause"] = True
     assert processor.action(sample)["control.enabled"] == 0
-    sample["head.tracked"] = True
+    sample["control.pause"] = False
     assert processor.action(sample)["control.enabled"] == 0
     processor.reset()
     assert processor.enabled is False
@@ -174,7 +174,7 @@ def test_pickup_requires_both_wrists_before_arm_activation(monkeypatch):
             robot.voice.update.assert_called_with(True)
 
 
-@pytest.mark.parametrize("cancel", ["pause", "stale", "quit"])
+@pytest.mark.parametrize("cancel", ["pause", "quit"])
 def test_pickup_wait_cannot_resume_after_cancel_without_start(monkeypatch, cancel):
     ik = Mock()
     ik.fk.return_value = (np.eye(4), np.eye(4))
@@ -222,9 +222,9 @@ def test_initial_pickup_waits_for_tracking_then_guides_without_another_start(mon
     assert processor.action(near)["control.enabled"]
     near["left.tracked"] = False
     assert not processor.action(near)["control.enabled"]
-    assert not processor.waiting_for_pickup
+    assert processor.waiting_for_pickup
     near["left.tracked"] = True
-    assert not processor.action(near)["control.enabled"]
+    assert processor.action(near)["control.enabled"]
 
 
 @pytest.mark.parametrize("mode", ["arms", "walk", "combined"])

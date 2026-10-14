@@ -46,12 +46,12 @@ def test_invalid_input_rejected(field, value):
         map_input(action)
 
 
-def test_stop_priority_and_pose_loss():
+def test_headset_buttons_never_stop_or_damp():
     action, _ = sample()
     action.update({"left.stick_click": True, "right.stick_click": True, "left.stick_y": 1.0})
-    assert not map_input(action)["velocity"].any()
+    assert map_input(action)["velocity"][0] == 0.3
     action["head.tracked"] = False
-    assert stop_buttons(action) == (False, True)
+    assert stop_buttons(action) == (False, False)
     action["captured_at"] = -1
     assert stop_buttons(action) == (False, False)
 
@@ -122,3 +122,25 @@ def test_cli_rejects_unsafe_combinations_before_io(extra):
     spec.loader.exec_module(module)
     with pytest.raises(SystemExit):
         module.parse_args(["--assets", "/unused", "--output", "/unused"] + extra)
+
+
+def test_pause_gesture_requires_continuous_fresh_samples():
+    from lerobot.robots.unitree_g1.g1_vr_control import PauseGesture
+
+    gesture = PauseGesture()
+    action = {"captured_at": 10.0, "left.secondary": True, "right.secondary": True}
+    for i in range(11):
+        action["captured_at"] = 10 + i / 10
+        assert gesture.update(action, now=action["captured_at"]) == (i == 10)
+    action["right.secondary"] = False
+    assert not gesture.update(action, now=11)
+    action["right.secondary"] = True
+    assert not gesture.update(action, now=11)
+    assert not gesture.update(action, now=11.2)  # Cached sample cannot advance time.
+    assert not gesture.update(action, now=12)  # Stale sample clears progress.
+    action["captured_at"] = 12
+    assert not gesture.update(action, now=12)
+    action["captured_at"] = 11.9  # Regression resets progress.
+    assert not gesture.update(action, now=12)
+    action["captured_at"] = 12.2  # Gap resets progress.
+    assert not gesture.update(action, now=12.2)

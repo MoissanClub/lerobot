@@ -18,6 +18,7 @@ from .g1_vr_assets import resolve_g1_vr_assets
 from .g1_vr_control import (
     ARM_KEYS,
     G1VRKinematics,
+    PauseGesture,
     XRStaleInputError,
     XRTrackingUnavailableError,
     map_input,
@@ -123,6 +124,9 @@ class G1VRActionProcessor(RobotActionProcessorStep):
         self.origin = None
         self.controller_anchor = None
         self.waiting_for_pickup = False
+        self.pause_gesture = PauseGesture()
+        self.loss_since: float | None = None
+        self.last_loss_log = -np.inf
         self.pickup_wrists = None
         self.last_pickup_log = -np.inf
         self.pickup_tracking_missing = False
@@ -273,6 +277,9 @@ class G1VRActionProcessor(RobotActionProcessorStep):
         self.outside_workspace = outside
 
     def action(self, action: dict) -> dict:
+        action = dict(action)
+        if self.pause_gesture.update(action):
+            action["control.pause"] = True
         obs = self.transition[TransitionKey.OBSERVATION]
         measured = np.array([obs[k] for k in ARM_KEYS], dtype=float)
         if not np.isfinite(measured).all():
@@ -308,7 +315,7 @@ class G1VRActionProcessor(RobotActionProcessorStep):
         stop, damp = stop_buttons(action)
         stop = stop or bool(action.get("control.quit", False))
         if action.get("control.start", False):
-            if self.arm_test:
+            if self.arm_test or self.waiting_for_pickup:
                 if not self.enabled and not self.waiting_for_pickup:
                     self.waiting_for_pickup = True
                     self.pickup_wrists = self.ik.fk(measured)
@@ -334,6 +341,12 @@ class G1VRActionProcessor(RobotActionProcessorStep):
                 self.last_pickup_log = -np.inf
                 self.pickup_tracking_missing = False
         except (KeyError, ValueError, TypeError) as exc:
+            recover_pickup = self.enabled or self.waiting_for_pickup
+            now = time.monotonic()
+            if self.loss_since is None:
+                self.loss_since = now
+            if recover_pickup and now - self.loss_since >= 1.0 and self.reference_state != "lost":
+                self._reference_status(action, "lost", "Holding. Pickup required when input returns.")
             initial_tracking_wait = (
                 self.waiting_for_pickup
                 and self.origin is None
@@ -352,7 +365,10 @@ class G1VRActionProcessor(RobotActionProcessorStep):
                         missing,
                     )
                     self.last_pickup_log = time.monotonic()
-            elif action.get("control.start", False) or self.enabled or self.waiting_for_pickup:
+            elif (
+                action.get("control.start", False) or self.enabled or self.waiting_for_pickup
+            ) and now - self.last_loss_log >= 10.0:
+                self.last_loss_log = now
                 logging.warning(
                     "XR tracking paused: %s (head=%s, left=%s, right=%s)",
                     exc,
@@ -363,7 +379,13 @@ class G1VRActionProcessor(RobotActionProcessorStep):
             self.enabled = False
             self.held = measured.copy()
             self.controller_anchor = None
-            self.waiting_for_pickup = initial_tracking_wait
+            self.waiting_for_pickup = recover_pickup
+            if recover_pickup:
+                self.pickup_wrists = self.ik.fk(measured)
+        else:
+            self.loss_since = None
+            self.reference_state = None
+        picked_up = False
         if self.waiting_for_pickup and intent:
             differences = [
                 start[:3, 3] - wrist[:3, 3]
@@ -372,6 +394,8 @@ class G1VRActionProcessor(RobotActionProcessorStep):
             if max(np.linalg.norm(delta) for delta in differences) <= 0.05:
                 self.waiting_for_pickup = False
                 self.enabled = True
+                picked_up = True
+                self.held = measured.copy()
                 logging.info("VR pickup reached: requesting following without a target jump.")
             elif time.monotonic() - self.last_pickup_log >= 2.0:
                 logging.info(
@@ -382,19 +406,24 @@ class G1VRActionProcessor(RobotActionProcessorStep):
                 )
                 self.last_pickup_log = time.monotonic()
         velocity = np.zeros(3)
-        if self.enabled and intent:
+        if self.enabled and intent and (not picked_up or self.arm_test):
             try:
                 if self.arm_test:
                     self.held = self._test_target(action, measured)
                 else:
                     self.held, _ = self.ik.solve(intent["wrists"], measured, self.max_step)
                     velocity = intent["velocity"]
-            except RuntimeError:
-                logging.exception("IK failed: paused at measured pose; explicit restart required")
+                validate_xr_timestamp(float(action["captured_at"]))
+                if not np.isfinite(self.held).all():
+                    raise ValueError("Invalid IK target")
+            except (RuntimeError, ValueError, TypeError):
+                logging.exception("IK failed: holding measured pose; pickup required")
                 self.enabled = False
                 self.held = measured.copy()
                 self.controller_anchor = None
-                self.waiting_for_pickup = False
+                self.waiting_for_pickup = True
+                self.pickup_wrists = self.ik.fk(measured)
+                velocity[:] = 0
         result = dict(zip(ARM_KEYS, self.held.tolist(), strict=True))
         result.update(
             dict(

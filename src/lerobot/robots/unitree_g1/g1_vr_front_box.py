@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from .g1_vr_control import map_input, stop_buttons
+from .g1_vr_control import PauseGesture, map_input, validate_xr_timestamp
 
 # Shoulder pitch/roll/yaw, elbow, wrist roll/pitch/yaw, left then right.
 READY_ARM_Q = np.array([-0.3, 0.2, 0.0, 1.0, 0.0, 0.0, 0.0, -0.3, -0.2, 0.0, 1.0, 0.0, 0.0, 0.0])
@@ -39,6 +39,9 @@ class FrontBoxTracking:
         self.motion_progress = 0.0
         self.ready_reached = False
         self.homed = False
+        self.pause_gesture = PauseGesture()
+        self.loss_since: float | None = None
+        self.loss_announced = False
 
     def _inside(self, q: np.ndarray, *, preparation: bool = False) -> bool:
         lower = PREPARATION_LOWER if preparation else WORKSPACE_LOWER
@@ -108,15 +111,13 @@ class FrontBoxTracking:
         self.last_time = now
         if self.target is None:
             self.target = measured.copy()
-        stop, damp = stop_buttons(action, now=now)
-        if stop or damp:  # Emergency controller buttons bypass graceful lowering.
-            return measured.copy(), False, True, damp
+        pause = self.pause_gesture.update(action, now=now) or action.get("control.pause", False)
         if action.get("control.quit", False) and (self.phase != "exit" or self.paused):
             logging.info("Lowering arms and quitting. Keep clear.")
             self.phase = "exit"
             self.target = measured.copy()
             self._begin_motion(LOWERED_ARM_Q, now, 1.0)
-        elif action.get("control.pause", False):
+        elif pause and not self.paused:
             self.target = measured.copy()
             self.paused = True
             self.sync_since = None
@@ -124,7 +125,7 @@ class FrontBoxTracking:
             if self.phase == "synced":
                 self._unsync(measured)
             logging.info("Arm motion paused. Press r to resume, or q to lower and quit.")
-        elif action.get("control.start", False) and self.phase != "exit":
+        elif not pause and action.get("control.start", False) and self.phase != "exit":
             if self.phase == "initial" and (self.motion_goal is None or self.paused):
                 logging.info("Robot arms will rise to the ready position in five seconds. Keep clear.")
                 self._begin_motion(READY_ARM_Q if self.homed else LOWERED_ARM_Q, now, 5.0)
@@ -155,15 +156,24 @@ class FrontBoxTracking:
             intent = map_input(action, now=now)
             if action["captured_at"] < self.last_stamp:
                 raise ValueError("XR timestamp regressed")
+            if action["captured_at"] - self.last_stamp > 0.25:
+                self.sync_since = None
             self.last_stamp = action["captured_at"]
         except (KeyError, ValueError, TypeError):
+            if self.loss_since is None:
+                self.loss_since = now
             if self.phase == "synced":
-                self._unsync(measured, lost=True)
+                self._unsync(measured)
+            if now - self.loss_since >= 1.0 and not self.loss_announced:
+                logging.info("Lost track. Holding; pickup required when input returns.")
+                self.loss_announced = True
             self.sync_since = None
             if now - self.last_prompt >= 10.0:
                 logging.info("VR controllers unavailable. Connect, press Play, and wake both controllers.")
                 self.last_prompt = now
             return self.target.copy(), self.enabled, False, False
+        self.loss_since = None
+        self.loss_announced = False
         if self.phase == "unsynced":
             actual = self.ik.fk(measured)
             differences = [w[:3, 3] - r[:3, 3] for w, r in zip(actual, intent["wrists"], strict=True)]
@@ -208,7 +218,10 @@ class FrontBoxTracking:
                     else:
                         outside = middle
                 candidate = safe
+            validate_xr_timestamp(float(action["captured_at"]))
+            if not np.isfinite(candidate).all():
+                raise ValueError("Invalid IK target")
             self.target = candidate
-        except RuntimeError:
+        except (RuntimeError, ValueError, TypeError):
             self._unsync(measured, lost=True)
         return self.target.copy(), self.enabled, False, False

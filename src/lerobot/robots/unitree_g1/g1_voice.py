@@ -73,6 +73,8 @@ class _PromptHandler(logging.Handler):
             if now - self.last_guidance >= 10.0:
                 self.last_guidance = now
                 self.voice.say("Please connect and wake both VR controllers.")
+        elif message.startswith("Lost track. Holding"):
+            self.voice.say("Lost track. Holding. Align controllers to resume.")
         elif message == "Lost track.":
             self.voice.say(message)
         elif message == "Lost track. Slow down.":
@@ -109,9 +111,9 @@ class _PromptHandler(logging.Handler):
         elif message.startswith("VR workspace regained"):
             self.voice.say("Hands back in range. Robot continues to follow.")
         elif message.startswith("XR tracking paused"):
-            self.voice.say("Tracking lost. Following paused. Restore tracking and press R to pick up again.")
+            self.voice.say("Tracking lost. Holding. Align controllers when tracking returns.")
         elif message.startswith("IK failed"):
-            self.voice.say("Arm target could not be solved. Following paused. Press R to pick up again.")
+            self.voice.say("Arm target could not be solved. Holding. Align controllers to resume.")
         elif message.startswith("VR pickup cancelled"):
             self.voice.say("Pickup cancelled. Following paused.")
 

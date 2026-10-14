@@ -89,7 +89,9 @@ def sync(tracking):
     before = q.copy()
     tick(tracking)
     assert tracker.phase == "unsynced"
-    tick(tracking, 2.99)
+    for _ in range(59):
+        tick(tracking)
+    tick(tracking, 0.04)
     assert tracker.phase == "unsynced"
     tick(tracking, 0.01)
     assert tracker.phase == "synced"
@@ -123,7 +125,8 @@ def test_pickup_requires_continuously_close_tracked_hands(tracking, lost):
     near(tracking)
     tick(tracking, 2)
     assert tracker.phase == "unsynced"
-    tick(tracking, 3)
+    for _ in range(61):
+        tick(tracking)
     assert tracker.phase == "synced"
 
 
@@ -140,6 +143,9 @@ def test_lost_sync_holds_and_can_resync_without_r(tracking, lost, caplog):
     target, enabled, stop, _ = tick(tracking)
     assert enabled and not stop and tracker.phase == "unsynced"
     np.testing.assert_array_equal(target, q)
+    if lost:
+        assert "Lost track." not in caplog.text
+        tick(tracking, 1.0)
     assert "Lost track." in caplog.text
     sync(tracking)
 
@@ -206,10 +212,10 @@ def test_pause_cancels_sync_countdown(tracking):
     assert tracker.phase == "unsynced"
 
 
-def test_emergency_button_bypasses_lowering(tracking):
+def test_headset_button_does_not_release_authority(tracking):
     reach_ready(tracking)
     target, enabled, stop, damp = tick(tracking, **{"right.primary": True})
-    assert stop and not enabled and not damp
+    assert not stop and enabled and not damp
 
 
 def test_initial_q_when_already_lowered_never_enables_motors(tracking):
@@ -261,7 +267,8 @@ def test_sync_hysteresis_uses_same_distance_on_entry_and_exit(tracking, distance
 
     at_gap(0.99 * distance)
     tick(tracking)
-    tick(tracking, 3)
+    for _ in range(61):
+        tick(tracking)
     assert tracker.phase == "synced"
     # This also verifies the pickup offset cannot hide a large raw hand gap.
     at_gap(1.1 * distance)
@@ -276,7 +283,8 @@ def test_sync_hysteresis_uses_same_distance_on_entry_and_exit(tracking, distance
     assert tracker.phase == "unsynced" and tracker.sync_since is None
     at_gap(0.99 * distance)
     tick(tracking)
-    tick(tracking, 3)
+    for _ in range(61):
+        tick(tracking)
     assert tracker.phase == "synced"
 
 
@@ -307,3 +315,73 @@ def test_preparation_rejects_pose_beyond_rear_margin(tracking):
     with pytest.raises(RuntimeError, match="Cartesian workspace"):
         tick(tracking, 5, **{"control.start": False})
     assert not tracker.enabled
+
+
+def test_combo_pause_holds_target_until_explicit_restart(tracking):
+    tracker, _, q, _ = tracking
+    reach_ready(tracking)
+    sync(tracking)
+    for _ in range(22):
+        target, enabled, stop, damp = tick(tracking, **{"left.secondary": True, "right.secondary": True})
+        assert enabled and not stop and not damp
+    assert tracker.paused and tracker.phase == "unsynced"
+    held = target.copy()
+    q[:] += 0.001
+    for _ in range(30):
+        np.testing.assert_array_equal(tick(tracking)[0], held)
+    tick(tracking, **{"left.secondary": False, "right.secondary": False})
+    assert tracker.paused
+    tick(tracking, **{"control.start": True})
+    assert not tracker.paused and tracker.phase == "unsynced"
+
+
+@pytest.mark.parametrize("fault", ["stale", "missing", "nan", "quaternion", "future"])
+def test_invalid_input_holds_and_requires_new_pickup(tracking, fault):
+    tracker, now, q, sample = tracking
+    reach_ready(tracking)
+    sync(tracking)
+    sample["captured_at"] = now[0]
+    if fault == "stale":
+        sample["captured_at"] -= 0.251
+    elif fault == "future":
+        sample["captured_at"] += 1
+    elif fault == "missing":
+        del sample["left.grip_pos"]
+    elif fault == "nan":
+        sample["left.grip_pos"][0] = np.nan
+    else:
+        sample["left.grip_quat"] = np.zeros(4)
+    target, enabled, stop, damp = tracker.step(sample, q)
+    assert enabled and not stop and not damp and tracker.phase == "unsynced"
+    np.testing.assert_array_equal(target, q)
+    near(tracking)
+    tick(tracking)
+    assert tracker.phase == "unsynced"
+    for _ in range(61):
+        tick(tracking)
+    assert tracker.phase == "synced"
+    np.testing.assert_array_equal(tracker.target, q)
+
+
+def test_slow_ik_cannot_publish_expired_input(tracking, monkeypatch):
+    tracker, now, q, _ = tracking
+    reach_ready(tracking)
+    sync(tracking)
+
+    def slow_solve(*args):
+        now[0] += 0.3
+        return q + 0.01, np.zeros(14)
+
+    monkeypatch.setattr(tracker.ik, "solve", slow_solve)
+    target, enabled, stop, damp = tick(tracking)
+    assert tracker.phase == "unsynced" and enabled and not stop and not damp
+    np.testing.assert_array_equal(target, q)
+
+
+def test_camera_status_does_not_pause_tracking(tracking):
+    tracker, _, _, _ = tracking
+    reach_ready(tracking)
+    sync(tracking)
+    tick(tracking, **{"camera.available": False, "camera.stale": True})
+    assert tracker.phase == "synced"
+

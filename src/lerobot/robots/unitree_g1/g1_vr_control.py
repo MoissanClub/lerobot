@@ -39,15 +39,33 @@ def validate_xr_timestamp(stamp: float, *, now: float | None = None, max_age: fl
 
 
 def stop_buttons(sample: dict, *, now: float | None = None, max_age: float = 0.25) -> tuple[bool, bool]:
-    """Fresh stop buttons remain usable when pose tracking is invalid."""
-    now = time.monotonic() if now is None else now
-    stamp = float(sample.get("captured_at", float("nan")))
-    if not np.isfinite(stamp) or not 0 <= now - stamp <= max_age:
-        return False, False
-    return (
-        bool(sample.get("right.primary", False)),
-        bool(sample.get("left.stick_click", False) and sample.get("right.stick_click", False)),
-    )
+    """Headset buttons never request shutdown, damping, or stock handback."""
+    return False, False
+
+
+class PauseGesture:
+    """B+Y held for one second of fresh input requests pause, never handback."""
+
+    def __init__(self) -> None:
+        self.since: float | None = None
+        self.last_stamp: float | None = None
+
+    def update(self, sample: dict, *, now: float | None = None) -> bool:
+        now = time.monotonic() if now is None else now
+        try:
+            stamp = float(sample["captured_at"])
+            validate_xr_timestamp(stamp, now=now)
+            held = bool(sample.get("left.secondary", False) and sample.get("right.secondary", False))
+        except (KeyError, TypeError, ValueError):
+            held, stamp = False, None
+        if not held:
+            self.since = self.last_stamp = None
+            return False
+        if self.last_stamp is None or not 0 <= stamp - self.last_stamp <= 0.25:
+            self.since = stamp
+        self.last_stamp = stamp
+        # Re-reading a cached sample cannot advance the gesture timer.
+        return stamp - self.since >= 1.0
 
 
 def pose(position, quaternion) -> np.ndarray:
@@ -106,11 +124,8 @@ def map_input(sample: dict, *, now: float | None = None, max_age: float = 0.25) 
     )
     if not np.isfinite(sticks).all() or np.any(abs(sticks) > 1):
         raise ValueError("Invalid joystick input")
-    damp = bool(sample["left.stick_click"] and sample["right.stick_click"])
-    quit_requested = bool(sample["right.primary"])
+    damp, quit_requested = False, False
     velocity = np.array([sticks[1], -sticks[0], -sticks[2]]) * 0.3
-    if damp or quit_requested:
-        velocity[:] = 0
     return {"wrists": wrists, "velocity": velocity, "hands": hands, "damp": damp, "quit": quit_requested}
 
 
