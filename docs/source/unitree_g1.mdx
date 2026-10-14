@@ -422,16 +422,16 @@ H.264, then **Connect → Play**. Confirm live camera video and head/controller
 tracking before enabling following. The composition option above is needed on Orin.
 Use the laptop terminal for `r`, `p`, and `q`, each followed by Enter.
 
-| State | Behavior and transition |
-| --- | --- |
-| Initializing | Announces startup, waits five seconds, then commands zero arm joint angles without VR input. |
-| Waiting | Holds the initialization target, or the measured pose captured by `p`. `r` enables following when tracking and IK are valid. |
-| Following | Follows head-relative VR wrist targets. `p` returns to Waiting and holds the arms. |
-| Tracking lost | Holds the arm target. Automatically resumes when fresh valid tracking and IK targets return, unless `p` was pressed. |
-| Command hold | A caller gap longer than 100 ms captures measured arm positions and retains authority. After following has been enabled, fresh valid targets computed after the hold automatically resume it. `p` cancels automatic recovery. |
-| IK blocked | Holds the arms and reports the error. Correct the input and press `r` to retry. |
-| Exiting | `q` returns to zero arm joint angles, then fades authority over two seconds. Home return has a five-second deadline; a failed return releases authority and reports an error. |
-| Fault | Invalid/stale robot feedback or a caller outage longer than one second releases authority to Unitree and stops the session. Restart after resolving the cause. |
+| State         | Behavior and transition                                                                                                                                                                                                       |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Initializing  | Announces startup, waits five seconds, then commands zero arm joint angles without VR input.                                                                                                                                  |
+| Waiting       | Holds the initialization target, or the measured pose captured by `p`. `r` enables following when tracking and IK are valid.                                                                                                  |
+| Following     | Follows head-relative VR wrist targets. `p` returns to Waiting and holds the arms.                                                                                                                                            |
+| Tracking lost | Holds the arm target. Automatically resumes when fresh valid tracking and IK targets return, unless `p` was pressed.                                                                                                          |
+| Command hold  | A caller gap longer than 100 ms captures measured arm positions and retains authority. After following has been enabled, fresh valid targets computed after the hold automatically resume it. `p` cancels automatic recovery. |
+| IK blocked    | Holds the arms and reports the error. Correct the input and press `r` to retry.                                                                                                                                               |
+| Exiting       | `q` returns to zero arm joint angles, waits for measured arrival, then fades authority over two seconds. Home return has a five-second deadline; a failed return is reported and shutdown continues.                          |
+| Fault         | Invalid/stale robot feedback or a caller outage longer than one second invokes the same best-effort return and stops the session. Restart after resolving the cause.                                                          |
 
 Tracking loss and brief caller delays recover automatically only after `r` has
 enabled following. Explicit `p` always requires another `r`. There is no positional
@@ -449,9 +449,14 @@ A caller timeout describes delayed application updates, not VR disconnection.
 `robot.arm_sdk.command_timeout_s` sets the hold threshold (0.1 s), and
 `robot.arm_sdk.command_fault_timeout_s` sets the fatal threshold (1.0 s, greater
 than the hold threshold). Robot feedback must remain fresh even while holding.
-Fatal publisher errors send zero arm authority and stop publishing. This requests
-handover to the native controller; it is not confirmation of acceptance or a
-physical stop, and the native controller may lower the arms.
+Normal exit and fatal publisher errors share one handover routine: command zero
+arm angles at `return_velocity` (0.5 rad/s by default), require measured joints
+within `return_tolerance` (0.05 rad) before the five-second deadline, then fade
+the current SDK authority weight to zero over `return_fade_s` (2.0 s). If fresh
+feedback, motion, or publication fails, the routine records the failure and
+shutdown continues without inventing a second fallback trajectory. Publisher
+closure requests handover to the native controller; it is not confirmation of
+acceptance or a physical stop, and the native controller may lower the arms.
 
 The controller follows the arm gains, 250 Hz publication target, full startup
 authority, and measured-position target clipping of
@@ -473,14 +478,15 @@ Keep these diagnostics and the full terminal traceback when diagnosing a fault.
 The guarded controller is a separate diagnostic option. Do not combine
 `arm_controller=unitree` with `arm_test=true` or a contract.
 
-| Configuration | Purpose |
-| --- | --- |
+| Configuration                                                                                        | Purpose                                                                                                                                       |
+| ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `arm_controller=guarded`, `arm_test=true`, `arm_test_workspace=small`, `arm_test_start_pose=current` | Limited motion around the measured starting pose: 0.02 rad/s commanded speed, 20 mm wrist target radius, positional pickup before activation. |
-| `arm_controller=guarded`, `arm_test=true`, `arm_test_workspace=front_box` | Custom raised ready pose, positional pickup/countdown, and a one-metre workspace box with additional measured-motion guards. |
-| `arm_controller=guarded`, `arm_test=false` | Explicit reviewed SDK gains, mode, torque thresholds and motion limits, or an existing contract. |
+| `arm_controller=guarded`, `arm_test=true`, `arm_test_workspace=front_box`                            | Custom raised ready pose, positional pickup/countdown, and a one-metre workspace box with additional measured-motion guards.                  |
+| `arm_controller=guarded`, `arm_test=false`                                                           | Explicit reviewed SDK gains, mode, torque thresholds and motion limits, or an existing contract.                                              |
 
-These profiles retain their own preparation, pickup and fault behavior; the
-reference controller's automatic recovery table above does not apply to them.
+These profiles retain their own preparation, pickup and fault behavior, while
+using the same central zero-pose return and authority fade. The reference
+controller's automatic recovery table above does not otherwise apply to them.
 The guarded front-box profile uses gravity feedforward during preparation and
 following. Preparation allows up to 0.08 rad of joint-position error (configurable
 with `robot.arm_sdk.max_preparation_tracking_error`); following/hold retains the

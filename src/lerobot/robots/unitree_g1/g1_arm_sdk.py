@@ -8,6 +8,7 @@ and the operator stop arrangement. No MotionSwitcher commands are issued here.
 """
 
 import copy
+import logging
 import math
 import socket
 import threading
@@ -38,6 +39,10 @@ class G1ArmSDKConfig:
     command_fault_timeout_s: float = 1.0
     period_s: float = 0.02
     blend_s: float = 2.0
+    return_velocity: float = 0.5
+    return_tolerance: float = 0.05
+    return_timeout_s: float = 5.0
+    return_fade_s: float = 2.0
     ramp_authority: bool = True
     measured_target_clipping: bool = False
     max_velocity: float = 0.1
@@ -83,6 +88,10 @@ class G1ArmSDKConfig:
             "command_fault_timeout_s",
             "period_s",
             "blend_s",
+            "return_velocity",
+            "return_tolerance",
+            "return_timeout_s",
+            "return_fade_s",
             "max_velocity",
             "max_acceleration",
             "max_displacement",
@@ -210,6 +219,7 @@ class G1ArmSDK:
         self.max_feedback_gap_s = 0.0
         self.max_feedback_lock_wait_s = 0.0
         self.stop = threading.Event()
+        self.return_lock = threading.Lock()
         self.thread = None
         self.state = None
         self.state_at = None
@@ -225,13 +235,14 @@ class G1ArmSDK:
         self.preparing = config.max_preparation_tracking_error is not None
         self.gravity = None
         self.release_sent = False
+        self.returning_home = False
+        self.return_attempted = False
+        self.return_succeeded = False
         self.lease = None
 
     def _receive(self, msg):
         received_at = self.clock()
         with self.feedback_lock:
-            if self.stop.is_set():
-                return
             lock_wait = self.clock() - received_at
             self.max_feedback_lock_wait_s = max(self.max_feedback_lock_wait_s, lock_wait)
             try:
@@ -357,7 +368,10 @@ class G1ArmSDK:
             self.previous = self.initial.copy()
             self.velocity = np.zeros(14)
             self._check_state(state)
-            self.lease = open(f"/tmp/lerobot-g1-arm-{self.config.domain_id}.lock", "a")  # noqa: SIM115 - session lifetime
+            self.lease = open(  # noqa: SIM115 - session lifetime
+                f"/tmp/lerobot-g1-arm-{self.config.domain_id}.lock",  # nosec B108
+                "a",
+            )
         try:
             fcntl.flock(self.lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.transport.enable_writer()
@@ -481,7 +495,7 @@ class G1ArmSDK:
 
     def send(self, action, *, use_feedforward: bool = True, preparing: bool = False):
         with self.lock:
-            if not self.active or self.fault:
+            if not self.active or self.fault or self.returning_home:
                 raise RuntimeError(self.fault or "Arm authority not explicitly activated")
             try:
                 if set(action) != set(ARM_KEYS):
@@ -565,30 +579,93 @@ class G1ArmSDK:
             with self.lock:
                 self.fault = str(exc)
         finally:
-            self._release_authority()
+            self.return_to_stock()
 
-    def _release_authority(self) -> None:
-        with self.lock:
-            self.active = False
-            self.stop.set()
-            # Release to stock is not a verified physical stop.
+    def _return_snapshot(self):
+        """Read feedback during cleanup without masking it with the initiating fault."""
+        with self.feedback_lock:
+            if self.state_at is None or not 0 <= self.clock() - self.state_at <= self.config.max_state_age_s:
+                raise RuntimeError("Missing or stale feedback during stock-controller return")
+            state = self._copy_state(self.state)
+        q = self._q(state)
+        if q.shape != (14,) or not np.isfinite(q).all():
+            raise RuntimeError("Invalid arm feedback during stock-controller return")
+        return state, q
+
+    def return_to_stock(self) -> bool:
+        """Best-effort zero-pose return followed by a gradual authority fade.
+
+        This intentionally follows xr_teleoperate's simple shutdown sequence:
+        command zero pose, wait for measured arrival, then fade the Arm SDK
+        weight from its current value to zero. Cleanup failures are recorded but
+        never escape this method, so every exit path can call it safely.
+        """
+        with self.return_lock:
+            if self.return_attempted:
+                return self.return_succeeded
+            self.return_attempted = True
+            if not self.active or not self.writer:
+                return False
+
+            original_fault = self.fault
+            self.returning_home = True
             self.release_sent = False
-            for _ in range(3):
-                try:
-                    self.transport.write(
-                        arm_command(self.previous, np.zeros(14), 0.0, self.mode[0], self.config)
+            zero = np.zeros(14)
+            self.target = zero.copy()
+            return_weight = self.weight
+            try:
+                logging.info("Returning G1 arms to zero pose before restoring stock-controller authority")
+                steps = max(1, math.ceil(self.config.return_timeout_s / self.config.period_s))
+                arrived = False
+                last_command = self.previous.copy()
+                for _ in range(steps):
+                    state, measured = self._return_snapshot()
+                    delta = -measured
+                    scale = max(
+                        float(np.max(np.abs(delta))) / (self.config.return_velocity * self.config.period_s),
+                        1.0,
                     )
-                    self.release_sent = True
-                except Exception as exc:
-                    self.fault = f"{self.fault or 'Shutdown'}; release write failed: {exc}"
-                time.sleep(self.config.period_s)
+                    last_command = measured + delta / scale
+                    self.transport.write(
+                        arm_command(last_command, zero, return_weight, state.mode_machine, self.config)
+                    )
+                    self.previous = last_command
+                    if np.all(np.abs(measured) < self.config.return_tolerance):
+                        arrived = True
+                        break
+                    time.sleep(self.config.period_s)
+                if not arrived:
+                    raise RuntimeError("Timed out before measured arms reached the return pose")
+
+                fade_steps = 101
+                fade_period = self.config.return_fade_s / (fade_steps - 1)
+                for weight in np.linspace(return_weight, 0.0, fade_steps):
+                    state, _ = self._return_snapshot()
+                    self.transport.write(
+                        arm_command(zero, zero, float(weight), state.mode_machine, self.config)
+                    )
+                    self.weight = float(weight)
+                    time.sleep(fade_period)
+                self.release_sent = True
+                self.return_succeeded = True
+                logging.info("G1 arm authority returned to the stock controller")
+            except BaseException as exc:
+                message = f"Stock-controller return failed: {exc}"
+                self.fault = f"{original_fault}; {message}" if original_fault else message
+                logging.exception(message)
+            finally:
+                self.active = False
+                self.stop.set()
+            return self.return_succeeded
 
     def close(self):
         self.stop.set()
         if self.thread is not None and self.thread.ident is not None:
-            self.thread.join(timeout=2)
+            self.thread.join(timeout=self.config.return_timeout_s + self.config.return_fade_s + 2)
             if self.thread.is_alive():
                 raise RuntimeError("Arm publisher did not stop; operator intervention required")
+        elif self.active:
+            self.return_to_stock()
         self.connected = False
         try:
             self.transport.close()

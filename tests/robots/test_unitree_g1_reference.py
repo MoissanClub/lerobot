@@ -57,6 +57,7 @@ def backend():
     robot, transport, now, state = make_backend()
     yield robot, transport, now, state
     robot.active = False
+    robot.fault = None
     robot.close()
 
 
@@ -121,33 +122,45 @@ def test_short_caller_gap_holds_and_requires_current_resume_token(backend):
 
 def test_prolonged_caller_gap_still_faults_with_fresh_feedback(backend):
     robot, transport, now, state = backend
+    robot.weight = 1.0
     advance_feedback(robot, now, state, 1.05)
+
+    def follow_command(command):
+        now[0] += robot.config.period_s
+        state.tick += 1
+        for slot in ARM_SLOTS:
+            state.motor_state[slot].q = command.motor_cmd[slot].q
+        robot._receive(state)
+
+    transport.write.side_effect = follow_command
     robot._run()
     assert "Caller command timeout" in robot.fault
     assert not robot.active and robot.release_sent
-    assert len(transport.write.call_args_list) >= 3
-    assert all(call.args[0].motor_cmd[29].q == 0 for call in transport.write.call_args_list[-3:])
+    weights = [call.args[0].motor_cmd[29].q for call in transport.write.call_args_list[-101:]]
+    assert weights == pytest.approx(np.linspace(1.0, 0.0, 101))
     robot.fault = None  # fixture cleanup; no live publisher in this test
 
 
 def test_normal_exit_homes_then_ramps_weight(monkeypatch, backend):
-    robot, _, now, state = backend
-    weights = []
+    robot, transport, now, state = backend
+    robot.weight = 1.0
     for slot in ARM_SLOTS:
         state.motor_state[slot].q = 0.0
     robot._receive(SimpleNamespace(**{**state.__dict__, "tick": 2}))
 
     def sleep(dt):
-        weights.append(robot.release_weight)
         now[0] += dt
+        state.tick += 1
+        robot._receive(state)
 
-    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_unitree.time.sleep", sleep)
+    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep", sleep)
     robot.close()
     np.testing.assert_array_equal(robot.target, np.zeros(14))
-    assert len(weights) == 101
+    weights = [call.args[0].motor_cmd[29].q for call in transport.write.call_args_list[-101:]]
     assert weights[0] == 1.0 and weights[-1] == 0.0
     assert all(a >= b for a, b in zip(weights, weights[1:], strict=False))
     assert sum([0.02] * len(weights)) == pytest.approx(2.02)
+    assert robot.return_succeeded
     robot.active = False
 
 
@@ -317,40 +330,50 @@ def test_backend_rejects_invalid_resume_tokens(backend, token):
         robot.send(dict.fromkeys(ARM_KEYS, 0.2), resume_generation=token)
 
 
-def test_feedback_fault_releases_authority_even_during_command_hold(backend):
-    robot, transport, now, state = backend
+def test_stale_feedback_fault_attempts_return_without_blind_release(backend):
+    robot, _, now, state = backend
     advance_feedback(robot, now, state, 0.15)
     robot._step()
     assert robot.command_hold
     now[0] += 0.2
     robot._run()
     assert "stale feedback" in robot.fault
-    assert robot.release_sent and not robot.active
-    assert transport.write.call_args.args[0].motor_cmd[29].q == 0
+    assert robot.return_attempted and not robot.return_succeeded and not robot.active
+    assert "Stock-controller return failed" in robot.fault
     robot.fault = None
 
 
 def test_release_write_failure_is_reported(backend):
-    robot, transport, now, _ = backend
-    now[0] += 0.2
+    robot, transport, _, state = backend
+    for slot in ARM_SLOTS:
+        state.motor_state[slot].q = 0.0
+    state.tick += 1
+    robot._receive(state)
     transport.write.side_effect = RuntimeError("DDS write failed")
     robot._run()
     assert not robot.release_sent and not robot.active
-    assert "release write failed" in robot.fault
-    assert transport.write.call_count == 3
+    assert "Stock-controller return failed: DDS write failed" in robot.fault
+    assert transport.write.call_count == 2
     robot.fault = None
 
 
-def test_release_retries_after_transient_write_failure(backend):
-    robot, transport, now, _ = backend
-    now[0] += 0.2
-    transport.write.side_effect = [RuntimeError("DDS write failed"), None, None]
-    robot._run()
-    assert robot.release_sent and not robot.active
-    assert transport.write.call_count == 3
-    assert all(call.args[0].motor_cmd[29].q == 0 for call in transport.write.call_args_list)
-    assert "release write failed" in robot.fault
-    robot.fault = None
+def test_return_to_stock_is_idempotent(monkeypatch, backend):
+    robot, transport, now, state = backend
+    for slot in ARM_SLOTS:
+        state.motor_state[slot].q = 0.0
+    state.tick += 1
+    robot._receive(state)
+
+    def sleep(dt):
+        now[0] += dt
+        state.tick += 1
+        robot._receive(state)
+
+    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep", sleep)
+    assert robot.return_to_stock()
+    count = transport.write.call_count
+    assert robot.return_to_stock()
+    assert transport.write.call_count == count
 
 
 def test_feedback_ingestion_continues_during_blocked_publish(backend):
@@ -401,5 +424,5 @@ def test_receive_gap_remains_fatal_and_reports_callback_timing(backend):
     assert "callback gap=150.0 ms" in robot.fault
     assert "lock wait=0.0 ms" in robot.fault
     robot._run()
-    assert robot.release_sent and not robot.active
+    assert robot.return_attempted and not robot.release_sent and not robot.active
     robot.fault = None

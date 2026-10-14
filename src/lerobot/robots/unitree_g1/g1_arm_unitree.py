@@ -9,7 +9,6 @@ Only arm slots are owned; leg/waist commands remain inactive in motion mode.
 """
 
 import logging
-import time
 from typing import NamedTuple
 
 import numpy as np
@@ -44,8 +43,6 @@ class UnitreeArmSDK(G1ArmSDK):
             raise ValueError("command_fault_timeout_s must exceed command_timeout_s")
         self.command_hold = False
         self.hold_generation = 0
-        self.returning_home = False
-        self.release_weight = 1.0
         self.command_count = 0
         self.first_publish_at: float | None = None
         self.last_publish_at: float | None = None
@@ -86,7 +83,7 @@ class UnitreeArmSDK(G1ArmSDK):
         self, action: dict, *, use_feedforward: bool = True, resume_generation: int | None = None
     ) -> dict:
         with self.lock:
-            if not self.active or self.fault:
+            if not self.active or self.fault or self.returning_home:
                 raise RuntimeError(self.fault or "Arm authority not activated")
             if set(action) != set(ARM_KEYS):
                 raise ValueError("Each command must contain exactly the 14 arm targets")
@@ -152,7 +149,7 @@ class UnitreeArmSDK(G1ArmSDK):
             )
             if not np.isfinite(tau).all():
                 raise RuntimeError("Nonfinite feedforward torque")
-            self.weight = self.release_weight
+            self.weight = 1.0
             self.transport.write(arm_command(command, tau, self.weight, state.mode_machine, self.config))
             published = self.clock()
             if self.last_publish_at is not None:
@@ -165,47 +162,25 @@ class UnitreeArmSDK(G1ArmSDK):
             self.last_step = now
 
     def close(self) -> None:
-        """Normal exit homes first, then fades authority over two seconds."""
+        """Return through the shared stock-controller handover path."""
         try:
-            if self.active and not self.fault and not self.returning_home:
-                with self.lock:
-                    self.returning_home = True
-                    self.target = np.zeros(14)
-                deadline = self.clock() + 5.0
-                while self.active and not self.fault:
-                    with self.lock:
-                        measured = self._q(self._snapshot())
-                    if np.all(np.abs(measured) < 0.05):
-                        break
-                    if self.clock() >= deadline:
-                        raise RuntimeError("Unitree home return timed out before authority release")
-                    time.sleep(0.05)
-                if self.active and not self.fault:
-                    for weight in np.linspace(1.0, 0.0, 101):
-                        with self.lock:
-                            self.release_weight = float(weight)
-                        if self.fault:
-                            break
-                        time.sleep(0.02)
+            super().close()
         finally:
-            try:
-                super().close()
-            finally:
+            logging.info(
+                "Unitree feedback: %d samples, maximum callback gap %.1f ms, "
+                "maximum feedback lock wait %.1f ms",
+                self.feedback_count,
+                self.max_feedback_gap_s * 1000,
+                self.max_feedback_lock_wait_s * 1000,
+            )
+            first, last = self.first_publish_at, self.last_publish_at
+            if self.command_count > 1 and first is not None and last is not None and last > first:
                 logging.info(
-                    "Unitree feedback: %d samples, maximum callback gap %.1f ms, "
-                    "maximum feedback lock wait %.1f ms",
-                    self.feedback_count,
-                    self.max_feedback_gap_s * 1000,
-                    self.max_feedback_lock_wait_s * 1000,
+                    "Unitree arm publisher: %.1f Hz, maximum interval %.1f ms, %d commands",
+                    (self.command_count - 1) / (last - first),
+                    1000 * self.max_publish_gap,
+                    self.command_count,
                 )
-                first, last = self.first_publish_at, self.last_publish_at
-                if self.command_count > 1 and first is not None and last is not None and last > first:
-                    logging.info(
-                        "Unitree arm publisher: %.1f Hz, maximum interval %.1f ms, %d commands",
-                        (self.command_count - 1) / (last - first),
-                        1000 * self.max_publish_gap,
-                        self.command_count,
-                    )
 
     def _run(self) -> None:
         try:
@@ -217,9 +192,9 @@ class UnitreeArmSDK(G1ArmSDK):
             with self.lock:
                 self.fault = str(exc)
             logging.error(
-                "Teleop state: fault; releasing arm authority: %s",
+                "Teleop state: fault; returning arms before authority handover: %s",
                 exc,
-                extra={"teleop_voice": "Arm control fault. Releasing. Check the terminal."},
+                extra={"teleop_voice": "Arm control fault. Returning arms, then releasing."},
             )
         finally:
-            self._release_authority()
+            self.return_to_stock()

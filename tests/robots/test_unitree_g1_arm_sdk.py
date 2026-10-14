@@ -228,7 +228,7 @@ def test_slew_limits_both_derivatives_and_initial_blend(backend, velocity_limit,
     assert io.commands[-1].motor_cmd[29].q == pytest.approx(min(1.0, 149 * 0.02 / blend_s))
 
 
-def test_watchdog_releases_even_when_caller_disappears():
+def test_watchdog_attempts_shared_return_when_caller_disappears():
     io = FakeTransport()
     robot = G1ArmSDK(configuration(), transport=io)
     robot.connect()
@@ -239,7 +239,8 @@ def test_watchdog_releases_even_when_caller_disappears():
     assert not robot.active and robot.fault
     with pytest.raises(RuntimeError):
         robot.close()
-    assert robot.release_sent and io.commands[-1].motor_cmd[29].q == 0
+    assert robot.return_attempted and not robot.release_sent
+    assert "Stock-controller return failed" in robot.fault
 
 
 @pytest.mark.parametrize("field,value", [("q", 0.2), ("dq", 1.0), ("tau_est", 100.0)])
@@ -363,9 +364,9 @@ def test_release_failure_is_reported():
     robot.connect()
     robot.activate()
     io.write = lambda msg: (_ for _ in ()).throw(RuntimeError("link lost"))
-    with pytest.raises(RuntimeError, match="release write failed"):
+    with pytest.raises(RuntimeError, match="Stock-controller return failed: link lost"):
         robot.close()
-    assert not robot.release_sent and io.closed
+    assert robot.return_attempted and not robot.release_sent and io.closed
 
 
 def test_initialize_failure_closes_without_publish():

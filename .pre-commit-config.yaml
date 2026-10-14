@@ -18,6 +18,15 @@ default_language_version:
 exclude: "tests/artifacts/.*\\.safetensors$"
 
 repos:
+  - repo: local
+    hooks:
+      - id: check-g1-arm-handover
+        name: Check centralized G1 Arm SDK handover
+        entry: python scripts/check_g1_arm_handover.py
+        language: system
+        pass_filenames: false
+        files: ^(src/lerobot/robots/unitree_g1/|examples/unitree_g1/|scripts/check_g1_arm_handover\.py$)
+
   ##### Meta #####
   - repo: meta
     hooks:
