@@ -107,7 +107,7 @@ class UnitreeArmSDK(G1ArmSDK):
             return dict(zip(ARM_KEYS, self.target.tolist(), strict=True))
 
     def _check_caller(self, now: float, measured: np.ndarray) -> None:
-        if self.returning_home:
+        if self.config.unitree_gating or self.returning_home:
             return
         age = now - self.last_command
         if age > self.config.command_fault_timeout_s:

@@ -30,6 +30,8 @@ WEIGHT_SLOT = 29
 class G1ArmSDKConfig:
     network_interface: str
     read_only: bool = True
+    # Unitree motion/return gates only; experimental watchdogs and motion trips are disabled.
+    unitree_gating: bool = False
     domain_id: int = 0
     expected_mode_machine: int | None = None
     state_timeout_s: float = 5.0
@@ -67,6 +69,8 @@ class G1ArmSDKConfig:
     torque_limits: list[float] = field(default_factory=list)
 
     def __post_init__(self):
+        if not isinstance(self.unitree_gating, bool):
+            raise ValueError("unitree_gating must be boolean")
         if not isinstance(self.read_only, bool):
             raise ValueError("read_only must be boolean")
         if not isinstance(self.ramp_authority, bool):
@@ -239,6 +243,7 @@ class G1ArmSDK:
         self.returning_home = False
         self.return_attempted = False
         self.return_succeeded = False
+        self.handover_phase = "inactive"
         self.lease = None
 
     def _receive(self, msg):
@@ -253,10 +258,10 @@ class G1ArmSDK:
                 if not np.isfinite(msg.imu_state.rpy).all():
                     raise ValueError("Invalid IMU state")
                 mode = (int(msg.mode_machine), int(msg.mode_pr))
-                if self.mode is not None and mode != self.mode:
+                if not self.config.unitree_gating and self.mode is not None and mode != self.mode:
                     raise ValueError("Robot mode changed")
                 tick = int(msg.tick)
-                if self.tick is not None:
+                if not self.config.unitree_gating and self.tick is not None:
                     delta = (tick - self.tick) % (2**32)
                     if delta == 0:
                         return  # Repeated snapshots cannot refresh feedback freshness.
@@ -264,7 +269,7 @@ class G1ArmSDK:
                         raise ValueError("Robot tick regressed")
                 gap = 0.0 if self.state_at is None else received_at - self.state_at
                 self.max_feedback_gap_s = max(self.max_feedback_gap_s, gap)
-                if self.active and gap > self.config.max_state_age_s:
+                if not self.config.unitree_gating and self.active and gap > self.config.max_state_age_s:
                     raise ValueError(
                         "Feedback receive gap exceeded: "
                         f"callback gap={gap * 1000:.1f} ms, lock wait={lock_wait * 1000:.1f} ms, "
@@ -284,7 +289,10 @@ class G1ArmSDK:
         with self.feedback_lock:
             if self.fault:
                 raise RuntimeError(self.fault)
-            if self.state_at is None or not 0 <= self.clock() - self.state_at <= self.config.max_state_age_s:
+            if self.state_at is None or (
+                not self.config.unitree_gating
+                and not 0 <= self.clock() - self.state_at <= self.config.max_state_age_s
+            ):
                 raise RuntimeError("Missing or stale feedback")
             if self.config.lower:
                 self._check_pose(self._q(self.state))
@@ -345,7 +353,7 @@ class G1ArmSDK:
             if self.config.read_only or not self.connected or self.writer:
                 raise RuntimeError("Motion requires connected, motion-enabled, unused session")
             state = self._snapshot()
-            if (
+            if not self.config.unitree_gating and (
                 self.config.expected_mode_machine is None
                 or state.mode_machine != self.config.expected_mode_machine
                 or state.mode_pr != 0
@@ -353,7 +361,8 @@ class G1ArmSDK:
                 raise RuntimeError("Motion requires reviewed expected mode_machine matching feedback")
             self.initial = self._q(state)
             if (
-                self.config.start_position
+                not self.config.unitree_gating
+                and self.config.start_position
                 and np.max(np.abs(self.initial - self.config.start_position)) >= self.config.start_tolerance
             ):
                 raise RuntimeError(
@@ -361,8 +370,10 @@ class G1ArmSDK:
                     f"Measured arm positions: {self.initial.tolist()}"
                 )
             if (
-                self.config.max_wrist_displacement is not None or self.config.workspace_lower
-            ) and self.gravity is None:
+                not self.config.unitree_gating
+                and (self.config.max_wrist_displacement is not None or self.config.workspace_lower)
+                and self.gravity is None
+            ):
                 raise RuntimeError("Wrist displacement checks require the gravity/kinematics model")
             self._check_pose(self.initial)
             self.target = self.initial.copy()
@@ -383,7 +394,9 @@ class G1ArmSDK:
             # DDS endpoint discovery may briefly delay callbacks. No active
             # command has been sent; wait for fresh feedback before takeover.
             deadline = self.clock() + self.config.state_timeout_s
-            while self.state_at is None or self.clock() - self.state_at > self.config.max_state_age_s:
+            while self.state_at is None or (
+                not self.config.unitree_gating and self.clock() - self.state_at > self.config.max_state_age_s
+            ):
                 if self.fault or self.clock() >= deadline:
                     raise RuntimeError(self.fault or "Timed out waiting for fresh activation feedback")
                 time.sleep(0.002)
@@ -412,11 +425,15 @@ class G1ArmSDK:
         return measured.copy()
 
     def _check_pose(self, q):
+        if self.config.unitree_gating:
+            return
         if np.any(q < self.config.lower) or np.any(q > self.config.upper):
             raise ValueError("Arm target exceeds configured bounds")
 
     def _check_state(self, state):
         q = self._q(state)
+        if self.config.unitree_gating:
+            return q
         self._check_pose(q)
         if np.max(np.abs(q - self.initial)) > self.config.max_displacement:
             raise RuntimeError("Measured displacement limit exceeded")
@@ -473,6 +490,8 @@ class G1ArmSDK:
         return q
 
     def _check_wrist_displacement(self, q: np.ndarray) -> None:
+        if self.config.unitree_gating:
+            return
         if self.config.workspace_lower:
             for side, wrist in zip(("left", "right"), self.gravity.fk(q), strict=True):
                 if np.any(wrist[:3, 3] < self.config.workspace_lower) or np.any(
@@ -506,7 +525,10 @@ class G1ArmSDK:
                     raise ValueError("Arm targets must be finite scalars")
                 self._snapshot()
                 self._check_pose(q)
-                if np.max(np.abs(q - self.initial)) > self.config.max_displacement:
+                if (
+                    not self.config.unitree_gating
+                    and np.max(np.abs(q - self.initial)) > self.config.max_displacement
+                ):
                     raise ValueError("Requested displacement limit exceeded")
                 self._check_wrist_displacement(q)
                 self.target = q
@@ -522,9 +544,9 @@ class G1ArmSDK:
         with self.lock:
             now = self.clock()
             elapsed = now - self.last_step
-            if elapsed < 0 or elapsed > self.config.command_timeout_s:
+            if not self.config.unitree_gating and (elapsed < 0 or elapsed > self.config.command_timeout_s):
                 raise RuntimeError("Control scheduling deadline missed")
-            if now - self.last_command > self.config.command_timeout_s:
+            if not self.config.unitree_gating and now - self.last_command > self.config.command_timeout_s:
                 raise RuntimeError("Caller command timeout")
             dt = min(elapsed, self.config.period_s)
             state = self._snapshot()
@@ -547,7 +569,10 @@ class G1ArmSDK:
                 )
                 command = q + delta / scale
             self._check_pose(command)
-            if np.max(np.abs(command - self.initial)) > self.config.max_displacement:
+            if (
+                not self.config.unitree_gating
+                and np.max(np.abs(command - self.initial)) > self.config.max_displacement
+            ):
                 raise RuntimeError("Slew-limited displacement limit exceeded")
             self._check_wrist_displacement(command)
             tau = (
@@ -555,13 +580,18 @@ class G1ArmSDK:
                 if self.gravity is None or not self.use_feedforward
                 else self.gravity.gravity(command)
             )
-            if not np.isfinite(tau).all() or np.max(np.abs(tau)) > self.config.max_feedforward:
+            if not np.isfinite(tau).all() or (
+                not self.config.unitree_gating and np.max(np.abs(tau)) > self.config.max_feedforward
+            ):
                 raise RuntimeError("Invalid or excessive gravity feedforward")
             dq = np.array([state.motor_state[s].dq for s in ARM_SLOTS])
             estimated = np.asarray(self.config.kp) * (command - q) - np.asarray(self.config.kd) * dq + tau
-            if np.any(np.abs(estimated) > self.config.torque_limits) or any(
-                abs(state.motor_state[s].tau_est) > self.config.torque_limits[i]
-                for i, s in enumerate(ARM_SLOTS)
+            if not self.config.unitree_gating and (
+                np.any(np.abs(estimated) > self.config.torque_limits)
+                or any(
+                    abs(state.motor_state[s].tau_est) > self.config.torque_limits[i]
+                    for i, s in enumerate(ARM_SLOTS)
+                )
             ):
                 raise RuntimeError("Estimated arm torque limit exceeded")
             # Unitree's arm SDK motion-mode controller takes full authority;
@@ -580,13 +610,17 @@ class G1ArmSDK:
         except Exception as exc:
             with self.lock:
                 self.fault = str(exc)
+            logging.error("G1 arm control fault; attempting stock-controller return: %s", exc)
         finally:
             self.return_to_stock()
 
     def _return_snapshot(self):
         """Read feedback during cleanup without masking it with the initiating fault."""
         with self.feedback_lock:
-            if self.state_at is None or not 0 <= self.clock() - self.state_at <= self.config.max_state_age_s:
+            if self.state_at is None or (
+                not self.config.unitree_gating
+                and not 0 <= self.clock() - self.state_at <= self.config.max_state_age_s
+            ):
                 raise RuntimeError("Missing or stale feedback during stock-controller return")
             state = self._copy_state(self.state)
         q = self._q(state)
@@ -611,6 +645,7 @@ class G1ArmSDK:
 
             original_fault = self.fault
             self.returning_home = True
+            self.handover_phase = "return"
             self.release_sent = False
             zero = np.zeros(14)
             self.target = zero.copy()
@@ -618,9 +653,9 @@ class G1ArmSDK:
             return_tau = self.last_feedforward.copy()
             try:
                 logging.info("Returning G1 arms to zero pose before restoring stock-controller authority")
-                steps = max(1, math.ceil(self.config.return_timeout_s / self.config.period_s))
+                deadline = self.clock() + self.config.return_timeout_s
                 arrived = False
-                for _ in range(steps):
+                while self.clock() < deadline:
                     state, measured = self._return_snapshot()
                     last_command = self._return_target(measured)
                     self.transport.write(
@@ -630,7 +665,9 @@ class G1ArmSDK:
                     if np.all(np.abs(measured) < self.config.return_tolerance):
                         arrived = True
                         break
-                    time.sleep(self.config.period_s)
+                    remaining = deadline - self.clock()
+                    if remaining > 0:
+                        time.sleep(min(self.config.period_s, remaining))
                 if not arrived:
                     raise RuntimeError("Timed out before measured arms reached the return pose")
 
@@ -639,9 +676,14 @@ class G1ArmSDK:
                 fade_steps = max(1, math.ceil(self.config.return_fade_s / self.config.period_s)) + 1
                 fade_period = self.config.return_fade_s / (fade_steps - 1)
                 time.sleep(self.config.period_s)
-                for index, weight in enumerate(np.linspace(return_weight, 0.0, fade_steps)):
-                    if index:
-                        time.sleep(fade_period)
+                self.handover_phase = "fade"
+                fade_start = self.clock()
+                for index in range(fade_steps):
+                    delay = fade_start + index * fade_period - self.clock()
+                    if delay > 0:
+                        time.sleep(delay)
+                    fraction = min(max((self.clock() - fade_start) / self.config.return_fade_s, 0.0), 1.0)
+                    weight = return_weight * (1.0 - fraction) if index < fade_steps - 1 else 0.0
                     state, measured = self._return_snapshot()
                     last_command = self._return_target(measured)
                     self.transport.write(
@@ -649,10 +691,14 @@ class G1ArmSDK:
                     )
                     self.previous = last_command
                     self.weight = float(weight)
+                    if weight == 0.0:
+                        break
                 self.release_sent = True
                 self.return_succeeded = True
+                self.handover_phase = "complete"
                 logging.info("G1 arm authority returned to the stock controller")
             except BaseException as exc:
+                self.handover_phase = "failed"
                 message = f"Stock-controller return failed: {exc}"
                 self.fault = f"{original_fault}; {message}" if original_fault else message
                 logging.exception(message)

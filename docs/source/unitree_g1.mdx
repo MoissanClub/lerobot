@@ -462,6 +462,22 @@ shutdown continues without inventing a second fallback trajectory. Publisher
 closure requests handover to the native controller; it is not confirmation of
 acceptance or a physical stop, and the native controller may lower the arms.
 
+Arm angles are SDK joint coordinates in radians, not angles relative to the floor.
+In the G1-29 model, zero elbow coordinate does not mean a straight elbow; do not
+interpret return-to-zero as lowering the hands. Inspect the model and actual pose
+before choosing an inspection or return target.
+
+For supervised Unitree-gating experiments, set `--robot.arm_sdk.unitree_gating=true`.
+This disables the added measured-speed, torque, posture, position/displacement,
+tracking-error, feedback-age/mode-change, and caller/scheduling trips in the arm
+backend. Return still requires measured arrival before the authority fade; it does
+not reapply normal-control gates after an exception. Required finite command data,
+explicit activation, exclusive publisher ownership, and transport error reporting
+remain. This setting does not alter VR pickup/pause logic or target interpolation.
+Use independent physical coverage: gantry, clear workspace, and operator emergency
+control. The setting matches the reference's gating policy, not every aspect of
+its trajectory, gains, or lifecycle behavior.
+
 The controller follows the arm gains, 250 Hz publication target, full startup
 authority, and measured-position target clipping of
 [Unitree's G1-29 arm controller](https://github.com/unitreerobotics/xr_teleoperate/blob/main/teleop/robot_control/robot_arm.py).

@@ -578,3 +578,137 @@ def test_return_fade_recomputes_target_from_each_feedback_sample(backend, monkey
     step = robot.config.return_velocity * robot.config.period_s
     for command, q in zip(io.commands, measured, strict=True):
         np.testing.assert_allclose([command.motor_cmd[s].q for s in ARM_SLOTS], max(0.0, q - step))
+
+
+def test_return_timeout_includes_publication_and_sleep_overhead(backend, monkeypatch):
+    robot, io, now = backend
+    robot.config.return_timeout_s = 0.1
+    robot.weight = 1.0
+    msg = state(2)
+    for slot in ARM_SLOTS:
+        msg.motor_state[slot].q = 0.2
+    robot._receive(msg)
+    start = now[0]
+    write = io.write
+
+    def publish(command):
+        write(command)
+        now[0] += 0.04
+        msg.tick += 1
+        robot._receive(msg)
+
+    def sleep(dt):
+        now[0] += dt + 0.01
+        msg.tick += 1
+        robot._receive(msg)
+
+    monkeypatch.setattr(io, "write", publish)
+    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep", sleep)
+    assert not robot.return_to_stock()
+    assert len(io.commands) == 2
+    assert now[0] - start == pytest.approx(0.11)
+    assert "Timed out" in robot.fault
+    assert not robot.release_sent
+
+
+def test_unitree_gating_does_not_trip_on_experimental_motion_limits(backend):
+    robot, io, now = backend
+    robot.config.unitree_gating = True
+    msg = state(2)
+    for slot in ARM_SLOTS:
+        msg.motor_state[slot].q = 3.0  # Beyond configured position/displacement limits.
+        msg.motor_state[slot].dq = 0.6
+        msg.motor_state[slot].tau_est = 100.0
+    msg.imu_state.rpy = [0.5, 0.5, 0.0]
+    msg.mode_machine = 6
+    robot.gravity = SimpleNamespace(gravity=lambda _: np.full(14, 6.0))
+    now[0] += 2.0  # Feedback gap, caller age and scheduling deadline exceeded.
+    robot._receive(msg)
+    assert robot.fault is None
+    robot.send(dict.fromkeys(ARM_KEYS, 3.0))
+    now[0] += 2.0  # Reuse last feedback like upstream, without freshness gating.
+    robot._step()
+    assert robot.fault is None
+    assert io.commands[-1].mode_machine == 6
+    assert all(io.commands[-1].motor_cmd[s].tau == 6.0 for s in ARM_SLOTS)
+
+
+def test_unitree_gating_return_uses_arrival_without_normal_control_gates(backend, monkeypatch):
+    robot, io, now = backend
+    robot.config.unitree_gating = True
+    robot.weight = 1.0
+    robot.fault = "Original control failure"
+    msg = state(2)
+    for slot in ARM_SLOTS:
+        msg.motor_state[slot].q = 0.04
+        msg.motor_state[slot].dq = 0.6
+        msg.motor_state[slot].tau_est = 100.0
+    robot._receive(msg)
+    now[0] += 10.0
+    monkeypatch.setattr(
+        "lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep",
+        lambda dt: now.__setitem__(0, now[0] + dt),
+    )
+    assert robot.return_to_stock()
+    assert robot.fault == "Original control failure"
+    assert io.commands[-1].motor_cmd[29].q == 0.0
+
+
+def test_unitree_gating_still_requires_arrival_before_fade(backend, monkeypatch):
+    robot, io, now = backend
+    robot.config.unitree_gating = True
+    robot.config.return_timeout_s = 0.1
+    robot.weight = 1.0
+    msg = state(2)
+    for slot in ARM_SLOTS:
+        msg.motor_state[slot].q = 0.2
+    robot._receive(msg)
+    monkeypatch.setattr(
+        "lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep",
+        lambda dt: now.__setitem__(0, now[0] + dt),
+    )
+    assert not robot.return_to_stock()
+    assert all(command.motor_cmd[29].q == 1.0 for command in io.commands)
+    assert "Timed out" in robot.fault
+
+
+def test_fade_accounts_for_slow_publication_without_extending_every_sleep(backend, monkeypatch):
+    robot, io, now = backend
+    robot.config.unitree_gating = True
+    robot.config.return_fade_s = 0.1
+    robot.weight = 1.0
+    writes = []
+    write = io.write
+
+    def publish(command):
+        writes.append((now[0], robot.handover_phase, command.motor_cmd[29].q))
+        write(command)
+        now[0] += 0.03
+
+    monkeypatch.setattr(io, "write", publish)
+    monkeypatch.setattr(
+        "lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep",
+        lambda dt: now.__setitem__(0, now[0] + dt),
+    )
+    assert robot.return_to_stock()
+    fade = [row for row in writes if row[1] == "fade"]
+    assert fade[0][2] == 1.0 and fade[-1][2] == 0.0
+    assert all(a[2] >= b[2] for a, b in zip(fade, fade[1:], strict=False))
+    assert fade[-1][0] - fade[0][0] <= robot.config.return_fade_s + 0.03
+
+
+def test_unitree_gating_activation_does_not_require_reviewed_pose_or_mode():
+    io = FakeTransport()
+    robot = G1ArmSDK(
+        configuration(unitree_gating=True, expected_mode_machine=7, start_position=[1.0] * 14),
+        transport=io,
+    )
+    try:
+        robot.connect()
+        with patch("threading.Thread.start"):
+            robot.activate()
+        assert robot.active and io.writers == 1
+        np.testing.assert_array_equal(robot.initial, np.zeros(14))
+    finally:
+        robot.active = False  # Mock publisher never ran; no physical release needed.
+        robot.close()
