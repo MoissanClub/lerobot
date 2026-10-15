@@ -151,6 +151,7 @@ class UnitreeArmSDK(G1ArmSDK):
                 raise RuntimeError("Nonfinite feedforward torque")
             self.weight = 1.0
             self.transport.write(arm_command(command, tau, self.weight, state.mode_machine, self.config))
+            self.last_feedforward = tau.copy()
             published = self.clock()
             if self.last_publish_at is not None:
                 self.max_publish_gap = max(self.max_publish_gap, published - self.last_publish_at)

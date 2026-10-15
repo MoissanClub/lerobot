@@ -450,9 +450,13 @@ A caller timeout describes delayed application updates, not VR disconnection.
 `robot.arm_sdk.command_fault_timeout_s` sets the fatal threshold (1.0 s, greater
 than the hold threshold). Robot feedback must remain fresh even while holding.
 Normal exit and fatal publisher errors share one handover routine: command zero
-arm angles at `return_velocity` (0.5 rad/s by default), require measured joints
+arm angles using measured-position clipping with `return_velocity` (0.5 rad/s by default), require measured joints
 within `return_tolerance` (0.05 rad) before the five-second deadline, then fade
-the current SDK authority weight to zero over `return_fade_s` (2.0 s). If fresh
+the current SDK authority weight to zero over `return_fade_s` (2.0 s).
+Position clipping continues at the control cadence throughout the fade, retaining
+the last published feedforward torque. The velocity setting bounds the target
+offset from measured position per control period; it does not guarantee physical
+joint speed. Return behavior still requires physical validation on a gantry. If fresh
 feedback, motion, or publication fails, the routine records the failure and
 shutdown continues without inventing a second fallback trajectory. Publisher
 closure requests handover to the native controller; it is not confirmation of

@@ -482,6 +482,7 @@ def test_preparation_feedforward_and_separate_error_guard(backend):
     robot._receive(msg)
     robot._step()
     assert all(io.commands[-1].motor_cmd[s].tau == 1.0 for s in ARM_SLOTS)
+    np.testing.assert_array_equal(robot.last_feedforward, np.ones(14))
     robot.send(dict.fromkeys(ARM_KEYS, 0.0), preparing=False)
     with pytest.raises(RuntimeError, match="following/hold.*limit=0.0300"):
         robot._check_state(msg)
@@ -489,3 +490,91 @@ def test_preparation_feedforward_and_separate_error_guard(backend):
     msg.motor_state[ARM_SLOTS[3]].q = 0.081
     with pytest.raises(RuntimeError, match="preparation.*limit=0.0800"):
         robot._check_state(msg)
+
+
+@pytest.mark.parametrize("period", [0.02, 0.004])
+def test_return_clips_through_fade_and_retains_feedforward(backend, monkeypatch, period):
+    robot, io, now = backend
+    robot.config.period_s = period
+    robot.config.return_velocity = 0.05
+    robot.weight = 0.7
+    robot.last_feedforward = np.linspace(-1.0, 1.0, 14)
+    msg = state(2)
+    measured = np.linspace(-0.04, 0.04, 14)
+    for slot, q in zip(ARM_SLOTS, measured, strict=True):
+        msg.motor_state[slot].q = q
+    robot._receive(msg)
+    timestamps = []
+    write = io.write
+
+    def capture(command):
+        timestamps.append(now[0])
+        write(command)
+
+    def sleep(dt):
+        now[0] += dt
+        msg.tick += 1
+        robot._receive(msg)
+
+    monkeypatch.setattr(io, "write", capture)
+    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep", sleep)
+    assert robot.return_to_stock()
+    expected = measured * (1 - 0.05 * period / 0.04)
+    for command in io.commands:
+        np.testing.assert_allclose([command.motor_cmd[s].q for s in ARM_SLOTS], expected)
+        np.testing.assert_allclose([command.motor_cmd[s].tau for s in ARM_SLOTS], robot.last_feedforward)
+    weights = [command.motor_cmd[29].q for command in io.commands]
+    assert weights[0] == weights[1] == 0.7 and weights[-1] == 0.0
+    assert np.all(np.diff(weights) <= 0)
+    assert np.diff(timestamps) == pytest.approx(period)
+    assert timestamps[-1] - timestamps[1] == pytest.approx(robot.config.return_fade_s)
+    np.testing.assert_allclose(robot.previous, expected)
+
+
+def test_return_fade_rechecks_feedback_and_preserves_original_fault(backend, monkeypatch):
+    robot, io, now = backend
+    robot.weight = 1.0
+    robot.fault = "Original publisher fault"
+
+    def sleep(dt):
+        now[0] += dt  # No new feedback: fade must stop once it becomes stale.
+
+    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep", sleep)
+    assert not robot.return_to_stock()
+    assert "Original publisher fault" in robot.fault
+    assert "stale feedback" in robot.fault
+    assert not robot.release_sent
+    assert io.commands[-1].motor_cmd[29].q > 0.0
+    count = len(io.commands)
+    assert not robot.return_to_stock()
+    assert len(io.commands) == count
+
+
+def test_return_fade_recomputes_target_from_each_feedback_sample(backend, monkeypatch):
+    robot, io, now = backend
+    robot.config.return_velocity = 0.05
+    robot.weight = 1.0
+    msg = state(2)
+    for slot in ARM_SLOTS:
+        msg.motor_state[slot].q = 0.04
+    robot._receive(msg)
+    measured = []
+    write = io.write
+
+    def capture(command):
+        measured.append(msg.motor_state[ARM_SLOTS[0]].q)
+        write(command)
+
+    def sleep(dt):
+        now[0] += dt
+        msg.tick += 1
+        for slot in ARM_SLOTS:
+            msg.motor_state[slot].q *= 0.9
+        robot._receive(msg)
+
+    monkeypatch.setattr(io, "write", capture)
+    monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep", sleep)
+    assert robot.return_to_stock()
+    step = robot.config.return_velocity * robot.config.period_s
+    for command, q in zip(io.commands, measured, strict=True):
+        np.testing.assert_allclose([command.motor_cmd[s].q for s in ARM_SLOTS], max(0.0, q - step))

@@ -136,8 +136,9 @@ def test_prolonged_caller_gap_still_faults_with_fresh_feedback(backend):
     robot._run()
     assert "Caller command timeout" in robot.fault
     assert not robot.active and robot.release_sent
-    weights = [call.args[0].motor_cmd[29].q for call in transport.write.call_args_list[-101:]]
-    assert weights == pytest.approx(np.linspace(1.0, 0.0, 101))
+    fade_steps = int(np.ceil(robot.config.return_fade_s / robot.config.period_s)) + 1
+    weights = [call.args[0].motor_cmd[29].q for call in transport.write.call_args_list[-fade_steps:]]
+    assert weights == pytest.approx(np.linspace(1.0, 0.0, fade_steps))
     robot.fault = None  # fixture cleanup; no live publisher in this test
 
 
@@ -156,10 +157,11 @@ def test_normal_exit_homes_then_ramps_weight(monkeypatch, backend):
     monkeypatch.setattr("lerobot.robots.unitree_g1.g1_arm_sdk.time.sleep", sleep)
     robot.close()
     np.testing.assert_array_equal(robot.target, np.zeros(14))
-    weights = [call.args[0].motor_cmd[29].q for call in transport.write.call_args_list[-101:]]
+    fade_steps = int(np.ceil(robot.config.return_fade_s / robot.config.period_s)) + 1
+    weights = [call.args[0].motor_cmd[29].q for call in transport.write.call_args_list[-fade_steps:]]
     assert weights[0] == 1.0 and weights[-1] == 0.0
     assert all(a >= b for a, b in zip(weights, weights[1:], strict=False))
-    assert sum([0.02] * len(weights)) == pytest.approx(2.02)
+    assert now[0] == pytest.approx(1.0 + robot.config.period_s + robot.config.return_fade_s)
     assert robot.return_succeeded
     robot.active = False
 

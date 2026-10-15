@@ -232,6 +232,7 @@ class G1ArmSDK:
         self.writer = False
         self.weight = 0.0
         self.use_feedforward = True
+        self.last_feedforward = np.zeros(14)
         self.preparing = config.max_preparation_tracking_error is not None
         self.gravity = None
         self.release_sent = False
@@ -569,6 +570,7 @@ class G1ArmSDK:
                 min(1.0, self.weight + dt / self.config.blend_s) if self.config.ramp_authority else 1.0
             )
             self.transport.write(arm_command(command, tau, self.weight, state.mode_machine, self.config))
+            self.last_feedforward = tau.copy()
             self.previous, self.velocity, self.last_step = command, velocity, now
 
     def _run(self):
@@ -595,9 +597,9 @@ class G1ArmSDK:
     def return_to_stock(self) -> bool:
         """Best-effort zero-pose return followed by a gradual authority fade.
 
-        This intentionally follows xr_teleoperate's simple shutdown sequence:
-        command zero pose, wait for measured arrival, then fade the Arm SDK
-        weight from its current value to zero. Cleanup failures are recorded but
+        Keep measured-relative target clipping and the last published feedforward
+        throughout the zero-pose return and authority fade, as in xr_teleoperate.
+        The clipping bounds target error, not measured joint speed. Cleanup failures are recorded but
         never escape this method, so every exit path can call it safely.
         """
         with self.return_lock:
@@ -613,21 +615,16 @@ class G1ArmSDK:
             zero = np.zeros(14)
             self.target = zero.copy()
             return_weight = self.weight
+            return_tau = self.last_feedforward.copy()
             try:
                 logging.info("Returning G1 arms to zero pose before restoring stock-controller authority")
                 steps = max(1, math.ceil(self.config.return_timeout_s / self.config.period_s))
                 arrived = False
-                last_command = self.previous.copy()
                 for _ in range(steps):
                     state, measured = self._return_snapshot()
-                    delta = -measured
-                    scale = max(
-                        float(np.max(np.abs(delta))) / (self.config.return_velocity * self.config.period_s),
-                        1.0,
-                    )
-                    last_command = measured + delta / scale
+                    last_command = self._return_target(measured)
                     self.transport.write(
-                        arm_command(last_command, zero, return_weight, state.mode_machine, self.config)
+                        arm_command(last_command, return_tau, return_weight, state.mode_machine, self.config)
                     )
                     self.previous = last_command
                     if np.all(np.abs(measured) < self.config.return_tolerance):
@@ -637,15 +634,21 @@ class G1ArmSDK:
                 if not arrived:
                     raise RuntimeError("Timed out before measured arms reached the return pose")
 
-                fade_steps = 101
+                # Keep publishing at the control cadence while authority changes.
+                # Arrival tolerance must not bypass clipping at the fade boundary.
+                fade_steps = max(1, math.ceil(self.config.return_fade_s / self.config.period_s)) + 1
                 fade_period = self.config.return_fade_s / (fade_steps - 1)
-                for weight in np.linspace(return_weight, 0.0, fade_steps):
-                    state, _ = self._return_snapshot()
+                time.sleep(self.config.period_s)
+                for index, weight in enumerate(np.linspace(return_weight, 0.0, fade_steps)):
+                    if index:
+                        time.sleep(fade_period)
+                    state, measured = self._return_snapshot()
+                    last_command = self._return_target(measured)
                     self.transport.write(
-                        arm_command(zero, zero, float(weight), state.mode_machine, self.config)
+                        arm_command(last_command, return_tau, float(weight), state.mode_machine, self.config)
                     )
+                    self.previous = last_command
                     self.weight = float(weight)
-                    time.sleep(fade_period)
                 self.release_sent = True
                 self.return_succeeded = True
                 logging.info("G1 arm authority returned to the stock controller")
@@ -657,6 +660,14 @@ class G1ArmSDK:
                 self.active = False
                 self.stop.set()
             return self.return_succeeded
+
+    def _return_target(self, measured: np.ndarray) -> np.ndarray:
+        """Clip the zero-pose goal relative to feedback, including during fade."""
+        scale = max(
+            float(np.max(np.abs(measured))) / (self.config.return_velocity * self.config.period_s),
+            1.0,
+        )
+        return measured - measured / scale
 
     def close(self):
         self.stop.set()
