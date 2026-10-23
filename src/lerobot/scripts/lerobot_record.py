@@ -91,7 +91,7 @@ lerobot-record \\
 
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pprint import pformat
 
 from lerobot.cameras import CameraConfig  # noqa: F401
@@ -99,6 +99,11 @@ from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.reachy2_camera import Reachy2CameraConfig  # noqa: F401
 from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.cameras.zmq import ZMQCameraConfig  # noqa: F401
+from lerobot.common.catch_up_monitor import (
+    ControlLoopMonitor,
+    JointTrackingWarningConfig,
+    make_so_arm_tracking_monitor,
+)
 from lerobot.common.control_utils import sanity_check_dataset_robot_compatibility
 from lerobot.configs import parser
 from lerobot.configs.dataset import DatasetRecordConfig
@@ -186,6 +191,8 @@ class RecordConfig:
     display_compressed_images: bool = False
     # Use vocal synthesis to read events.
     play_sounds: bool = True
+    # Warn when an SO follower exceeds its allowed leader/follower joint error.
+    catch_up_warning: JointTrackingWarningConfig = field(default_factory=JointTrackingWarningConfig)
     # Resume recording on an existing dataset.
     resume: bool = False
 
@@ -246,6 +253,7 @@ def record_loop(
     display_mode: str = "rerun",
     display_compressed_images: bool = False,
     timer: CycleTimer | None = None,
+    catch_up_monitor: ControlLoopMonitor | None = None,
 ) -> None:
     """Drive the robot from the teleoperator at *fps*, optionally recording each frame.
 
@@ -354,6 +362,10 @@ def record_loop(
             timestamp = time.perf_counter() - start_episode_t
             continue
 
+        if catch_up_monitor is not None:
+            with timer.section("monitor"):
+                catch_up_monitor.update(obs, robot_action_to_send)
+
         with timer.section("send"):
             # Send action to robot
             # Action can eventually be clipped using `max_relative_target`,
@@ -403,6 +415,7 @@ def record(
 
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+    catch_up_monitor: ControlLoopMonitor | None = None
 
     # Fall back to identity pipelines when the caller doesn't supply processors.
     if (
@@ -488,6 +501,12 @@ def record(
         if teleop is not None:
             teleop.connect()
         robot.connect()
+        catch_up_monitor = make_so_arm_tracking_monitor(
+            robot,
+            teleop,
+            cfg.catch_up_warning,
+            play_sounds=cfg.play_sounds,
+        )
 
         listener, events = init_keyboard_listener()
 
@@ -516,6 +535,7 @@ def record(
                     display_mode=cfg.display_mode,
                     display_compressed_images=display_compressed_images,
                     timer=timer,
+                    catch_up_monitor=catch_up_monitor,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -538,6 +558,7 @@ def record(
                         display_data=cfg.display_data,
                         display_mode=cfg.display_mode,
                         display_compressed_images=display_compressed_images,
+                        catch_up_monitor=catch_up_monitor,
                     )
 
                 if events["rerecord_episode"]:
@@ -572,6 +593,8 @@ def record(
             robot.disconnect()
         if teleop and teleop.is_connected:
             teleop.disconnect()
+        if catch_up_monitor is not None:
+            catch_up_monitor.close()
 
         if listener is not None:
             listener.stop()

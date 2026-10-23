@@ -107,6 +107,11 @@ lerobot-teleoperate \
   --display_data=true
 ```
 
+SO leader/follower teleoperation and recording warn when any arm joint trails its requested position by
+more than 10 degrees by default. The warning is repeated at most every 5 seconds and includes a voice prompt;
+the gripper is excluded. Tune it with `--catch_up_warning.joint_error_threshold=<degrees>`, disable it with
+`--catch_up_warning.enabled=false`, or keep the text warning but mute speech with `--play_sounds=false`.
+
 > **Feetech timeout / comms error on SO-100 / SO-101?** Before touching software, check the **red motor LEDs** on the daisy chain.
 >
 > - **All steady red, gripper → base chain** → wiring OK.

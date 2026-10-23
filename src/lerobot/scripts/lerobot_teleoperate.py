@@ -71,12 +71,17 @@ lerobot-teleoperate \
 
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pprint import pformat
 
 from lerobot.cameras.opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense import RealSenseCameraConfig  # noqa: F401
 from lerobot.cameras.zmq import ZMQCameraConfig  # noqa: F401
+from lerobot.common.catch_up_monitor import (
+    ControlLoopMonitor,
+    JointTrackingWarningConfig,
+    make_so_arm_tracking_monitor,
+)
 from lerobot.configs import parser
 from lerobot.processor import (
     RobotAction,
@@ -150,6 +155,10 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to display compressed (JPEG) images instead of raw frames
     display_compressed_images: bool = False
+    # Use vocal synthesis for operator prompts.
+    play_sounds: bool = True
+    # Warn when an SO follower exceeds its allowed leader/follower joint error.
+    catch_up_warning: JointTrackingWarningConfig = field(default_factory=JointTrackingWarningConfig)
 
 
 def teleop_loop(
@@ -163,6 +172,7 @@ def teleop_loop(
     display_mode: str = "rerun",
     duration: float | None = None,
     display_compressed_images: bool = False,
+    catch_up_monitor: ControlLoopMonitor | None = None,
 ):
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
@@ -181,6 +191,7 @@ def teleop_loop(
         teleop_action_processor: An optional pipeline to process raw actions from the teleoperator.
         robot_action_processor: An optional pipeline to process actions before they are sent to the robot.
         robot_observation_processor: An optional pipeline to process raw observations from the robot.
+        catch_up_monitor: Optional observational monitor for the follower state and final robot target.
     """
 
     display_len = max(len(key) for key in robot.action_features)
@@ -213,6 +224,10 @@ def teleop_loop(
 
                 # Process action for robot through pipeline
                 robot_action_to_send = robot_action_processor((teleop_action, obs))
+
+            if catch_up_monitor is not None:
+                with timer.section("monitor"):
+                    catch_up_monitor.update(obs, robot_action_to_send)
 
             with timer.section("send"):
                 # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
@@ -267,10 +282,16 @@ def teleoperate(cfg: TeleoperateConfig):
     robot = make_robot_from_config(cfg.robot)
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
-    teleop.connect()
-    robot.connect()
-
+    catch_up_monitor: ControlLoopMonitor | None = None
     try:
+        teleop.connect()
+        robot.connect()
+        catch_up_monitor = make_so_arm_tracking_monitor(
+            robot,
+            teleop,
+            cfg.catch_up_warning,
+            play_sounds=cfg.play_sounds,
+        )
         teleop_loop(
             teleop=teleop,
             robot=robot,
@@ -282,14 +303,19 @@ def teleoperate(cfg: TeleoperateConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            catch_up_monitor=catch_up_monitor,
         )
     except KeyboardInterrupt:
         pass
     finally:
         if cfg.display_data:
             shutdown_visualization(cfg.display_mode)
-        teleop.disconnect()
-        robot.disconnect()
+        if teleop.is_connected:
+            teleop.disconnect()
+        if robot.is_connected:
+            robot.disconnect()
+        if catch_up_monitor is not None:
+            catch_up_monitor.close()
 
 
 def main():

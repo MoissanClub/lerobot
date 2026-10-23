@@ -15,7 +15,7 @@
 # limitations under the License.
 
 import re
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -59,7 +59,15 @@ def test_teleoperate(cadence_log):
         fps=30,
         teleop_time_s=0.1,
     )
-    teleoperate(cfg)
+    monitor = MagicMock()
+    with patch(
+        "lerobot.scripts.lerobot_teleoperate.make_so_arm_tracking_monitor",
+        return_value=monitor,
+    ):
+        teleoperate(cfg)
+
+    assert monitor.update.call_count > 0
+    monitor.close.assert_called_once_with()
 
     # A teleop session has no episodes, so there is one cadence block for the whole run,
     # and the steps it names are the ones the loop wraps.
@@ -67,6 +75,33 @@ def test_teleoperate(cadence_log):
     assert summary.startswith("Cadence summary — whole run · target 30 Hz (33.3 ms budget per tick):")
     for step in ("observe", "teleop", "send"):
         assert step in summary, step
+
+
+def test_record_uses_one_tracking_monitor_for_the_session(tmp_path):
+    cfg = RecordConfig(
+        robot=MockRobotConfig(),
+        teleop=MockTeleopConfig(),
+        dataset=DatasetRecordConfig(
+            repo_id=DUMMY_REPO_ID,
+            single_task="Dummy task",
+            root=tmp_path / "tracking_monitor",
+            num_episodes=1,
+            episode_time_s=0.1,
+            push_to_hub=False,
+        ),
+        play_sounds=False,
+    )
+    monitor = MagicMock()
+
+    with patch(
+        "lerobot.scripts.lerobot_record.make_so_arm_tracking_monitor",
+        return_value=monitor,
+    ) as factory:
+        record(cfg)
+
+    factory.assert_called_once()
+    assert monitor.update.call_count > 0
+    monitor.close.assert_called_once_with()
 
 
 def test_record_and_resume(tmp_path):
