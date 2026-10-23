@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from lerobot.processor import RobotAction, RobotObservation
+from lerobot.utils.joint_telemetry import JointTelemetryWriter, finite_joint_values
 from lerobot.utils.utils import say
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,8 @@ class JointTrackingWarningConfig:
     joint_error_thresholds: dict[str, float] = field(default_factory=dict)
     recovery_ratio: float = 0.8
     warning_interval_s: float = 5.0
+    # Optional raw joint samples for offline velocity/catch-up analysis.
+    telemetry_path: str | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.joint_error_threshold) or self.joint_error_threshold <= 0:
@@ -74,6 +77,7 @@ class JointTrackingStatus:
     threshold: float
     is_slow: bool
     warning_due: bool
+    sample_index: int | None = None
 
 
 class ControlLoopMonitor(Protocol):
@@ -129,9 +133,17 @@ class SlowDownNotifier:
                 self._condition.wait_for(lambda: self._closed or self._latest is not None)
                 if self._closed:
                     return
+                status = self._latest
                 self._latest = None
 
-            logger.warning("slow down")
+            logger.warning(
+                "slow down event=%s sample_monotonic=%.9f joint=%s error=%.3f threshold=%.3f",
+                status.sample_index,
+                status.timestamp,
+                status.worst_joint,
+                status.worst_error,
+                status.threshold,
+            )
             if self.play_sounds:
                 try:
                     # Blocking here prevents the platform speech service from accumulating
@@ -163,6 +175,7 @@ class JointTrackingErrorMonitor:
         *,
         recovery_ratio: float = 0.8,
         warning_interval_s: float = 5.0,
+        telemetry: JointTelemetryWriter | None = None,
     ) -> None:
         if not thresholds:
             raise ValueError("At least one joint tracking threshold is required")
@@ -179,6 +192,8 @@ class JointTrackingErrorMonitor:
         self.warning_interval_s = warning_interval_s
         self._is_slow = False
         self._last_warning_at: float | None = None
+        self._sample_index = 0
+        self.telemetry = telemetry
 
     def update(
         self,
@@ -187,6 +202,7 @@ class JointTrackingErrorMonitor:
         timestamp: float | None = None,
     ) -> JointTrackingStatus | None:
         now = time.monotonic() if timestamp is None else timestamp
+        self._sample_index += 1
         errors: list[tuple[float, str, float, float]] = []
         for joint, threshold in self.thresholds.items():
             if joint not in observation or joint not in target:
@@ -202,6 +218,7 @@ class JointTrackingErrorMonitor:
             errors.append((error / threshold, joint, error, threshold))
 
         if not errors:
+            self._log_sample(observation, target, now, None)
             return None
 
         max_ratio, worst_joint, worst_error, threshold = max(errors)
@@ -223,14 +240,36 @@ class JointTrackingErrorMonitor:
             threshold=threshold,
             is_slow=self._is_slow,
             warning_due=warning_due,
+            sample_index=self._sample_index,
         )
+        self._log_sample(observation, target, now, status)
         if warning_due:
             self._last_warning_at = now
             self.notifier.notify_latest(status)
         return status
 
+    def _log_sample(self, observation, target, now, status):
+        if self.telemetry is None:
+            return
+        self.telemetry.submit(
+            {
+                "type": "sample",
+                "sample_index": self._sample_index,
+                "monotonic_s": now,
+                "wall_time_ns": time.time_ns(),
+                "follower_position": finite_joint_values(observation, self.thresholds),
+                "leader_target": finite_joint_values(target, self.thresholds),
+                "warning_due": status.warning_due if status is not None else False,
+                "is_slow": status.is_slow if status is not None else None,
+                "worst_joint": status.worst_joint if status is not None else None,
+                "worst_error": status.worst_error if status is not None else None,
+            }
+        )
+
     def close(self) -> None:
         self.notifier.close()
+        if self.telemetry is not None:
+            self.telemetry.close()
 
 
 def make_so_arm_tracking_monitor(
@@ -250,10 +289,27 @@ def make_so_arm_tracking_monitor(
     }
     if not thresholds:
         return None
+    telemetry = None
+    if config.telemetry_path:
+        units = (
+            "degrees" if getattr(getattr(robot, "config", None), "use_degrees", True) else "normalized_range"
+        )
+        telemetry = JointTelemetryWriter(
+            config.telemetry_path,
+            {
+                "joint_units": units,
+                "thresholds": thresholds,
+                "gripper_excluded": True,
+                "max_relative_target": getattr(getattr(robot, "config", None), "max_relative_target", None),
+                "target_semantics": "processed leader target before robot-side clipping",
+                "sample_time_semantics": "software timestamp after observation/action reads, before motor send; not simultaneous hardware sampling",
+            },
+        )
     notifier = SlowDownNotifier(play_sounds=play_sounds)
     return JointTrackingErrorMonitor(
         thresholds,
         notifier,
         recovery_ratio=config.recovery_ratio,
         warning_interval_s=config.warning_interval_s,
+        telemetry=telemetry,
     )
