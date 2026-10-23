@@ -131,6 +131,11 @@ from lerobot.teleoperators import (  # noqa: F401
     unitree_g1,
 )
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
+from lerobot.utils.catch_up_monitor import (
+    ControlLoopMonitor,
+    JointTrackingWarningConfig,
+    make_so_arm_tracking_monitor,
+)
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
@@ -224,6 +229,7 @@ class RecordConfig:
     display_compressed_images: bool = False
     # Use vocal synthesis to read events.
     play_sounds: bool = True
+    catch_up_warning: JointTrackingWarningConfig = field(default_factory=JointTrackingWarningConfig)
     # Resume recording on an existing dataset.
     resume: bool = False
 
@@ -299,6 +305,7 @@ def record_loop(
     single_task: str | None = None,
     display_data: bool = False,
     display_compressed_images: bool = False,
+    catch_up_monitor: ControlLoopMonitor | None = None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -399,6 +406,9 @@ def record_loop(
             action_values = act_processed_teleop
             robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
 
+        if catch_up_monitor is not None:
+            catch_up_monitor.update(obs, robot_action_to_send)
+
         # Send action to robot
         # Action can eventually be clipped using `max_relative_target`,
         # so action actually sent is saved in the dataset. action = postprocessor.process(action)
@@ -463,6 +473,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     dataset = None
     listener = None
+    catch_up_monitor: ControlLoopMonitor | None = None
 
     try:
         if cfg.resume:
@@ -520,6 +531,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if teleop is not None:
             teleop.connect()
 
+        catch_up_monitor = make_so_arm_tracking_monitor(
+            robot, teleop, cfg.catch_up_warning, play_sounds=cfg.play_sounds
+        )
         listener, events = init_keyboard_listener()
 
         if not cfg.dataset.streaming_encoding:
@@ -547,6 +561,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                     display_compressed_images=display_compressed_images,
+                    catch_up_monitor=catch_up_monitor,
                 )
 
                 # Execute a few seconds without recording to give time to manually reset the environment
@@ -571,6 +586,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         control_time_s=cfg.dataset.reset_time_s,
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        catch_up_monitor=catch_up_monitor,
                     )
 
                 if events["rerecord_episode"]:
@@ -592,6 +608,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             robot.disconnect()
         if teleop and teleop.is_connected:
             teleop.disconnect()
+
+        if catch_up_monitor is not None:
+            catch_up_monitor.close()
 
         if not is_headless() and listener:
             listener.stop()

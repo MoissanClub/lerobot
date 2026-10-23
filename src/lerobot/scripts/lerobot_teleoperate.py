@@ -53,7 +53,7 @@ lerobot-teleoperate \
 
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pprint import pformat
 
 import rerun as rr
@@ -99,6 +99,11 @@ from lerobot.teleoperators import (  # noqa: F401
     so_leader,
     unitree_g1,
 )
+from lerobot.utils.catch_up_monitor import (
+    ControlLoopMonitor,
+    JointTrackingWarningConfig,
+    make_so_arm_tracking_monitor,
+)
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import init_logging, move_cursor_up
@@ -121,6 +126,8 @@ class TeleoperateConfig:
     display_port: int | None = None
     # Whether to  display compressed images in Rerun
     display_compressed_images: bool = False
+    play_sounds: bool = True
+    catch_up_warning: JointTrackingWarningConfig = field(default_factory=JointTrackingWarningConfig)
 
 
 def teleop_loop(
@@ -133,6 +140,7 @@ def teleop_loop(
     display_data: bool = False,
     duration: float | None = None,
     display_compressed_images: bool = False,
+    catch_up_monitor: ControlLoopMonitor | None = None,
 ):
     """
     This function continuously reads actions from a teleoperation device, processes them through optional
@@ -171,6 +179,9 @@ def teleop_loop(
 
         # Process action for robot through pipeline
         robot_action_to_send = robot_action_processor((teleop_action, obs))
+
+        if catch_up_monitor is not None:
+            catch_up_monitor.update(obs, robot_action_to_send)
 
         # Send processed action to robot (robot_action_processor.to_output should return RobotAction)
         _ = robot.send_action(robot_action_to_send)
@@ -218,10 +229,13 @@ def teleoperate(cfg: TeleoperateConfig):
     robot = make_robot_from_config(cfg.robot)
     teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
 
-    teleop.connect()
-    robot.connect()
-
+    catch_up_monitor: ControlLoopMonitor | None = None
     try:
+        teleop.connect()
+        robot.connect()
+        catch_up_monitor = make_so_arm_tracking_monitor(
+            robot, teleop, cfg.catch_up_warning, play_sounds=cfg.play_sounds
+        )
         teleop_loop(
             teleop=teleop,
             robot=robot,
@@ -232,14 +246,19 @@ def teleoperate(cfg: TeleoperateConfig):
             robot_action_processor=robot_action_processor,
             robot_observation_processor=robot_observation_processor,
             display_compressed_images=display_compressed_images,
+            catch_up_monitor=catch_up_monitor,
         )
     except KeyboardInterrupt:
         pass
     finally:
         if cfg.display_data:
             rr.rerun_shutdown()
-        teleop.disconnect()
-        robot.disconnect()
+        if teleop.is_connected:
+            teleop.disconnect()
+        if robot.is_connected:
+            robot.disconnect()
+        if catch_up_monitor is not None:
+            catch_up_monitor.close()
 
 
 def main():
