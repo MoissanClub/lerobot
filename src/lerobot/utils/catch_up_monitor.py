@@ -136,7 +136,7 @@ class SlowDownNotifier:
                 try:
                     # Blocking here prevents the platform speech service from accumulating
                     # prompts.  This worker, never the control loop, does the waiting.
-                    self._speaker("Please slow down", blocking=True)
+                    self._speaker("Slow down", blocking=True)
                 except Exception:
                     logger.exception("Slow-down voice prompt failed")
 

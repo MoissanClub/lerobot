@@ -154,8 +154,8 @@ def test_slow_down_notifier_keeps_only_latest_pending_warning() -> None:
         notifier.close()
 
     assert speaker_calls == [
-        ("Please slow down", True),
-        ("Please slow down", True),
+        ("Slow down", True),
+        ("Slow down", True),
     ]
 
 
