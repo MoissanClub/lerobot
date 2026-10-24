@@ -16,7 +16,7 @@ parser.add_argument("--calibration", type=Path, required=True)
 parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
 source = args.log
-r = [json.loads(l) for l in source.open()]
+r = [json.loads(line) for line in source.open()]
 cal = json.loads(args.calibration.read_text())
 g = GravityModel(Path(__file__).parent / "vendor/so101_new_calib.urdf", cal)
 monitor = CapabilityMonitor(g, r[0]["bounds"])
