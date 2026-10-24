@@ -53,3 +53,21 @@ def test_pd_polarity_saturation_and_rated_models():
     assert pwm(np.array([100]), np.array([0]))[0] == 1
     assert SERVOS[0].stall_nm > SERVOS[1].stall_nm
     assert SERVOS[0].speed_rad_s < SERVOS[1].speed_rad_s
+
+
+def test_realtime_gravity_matches_mujoco_at_multiple_poses(tmp_path):
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from lerobot.utils.so101_capability_monitor import GravityModel
+
+    calibration = {"gripper": {"range_min": 2016, "range_max": 3510}}
+    gravity = GravityModel(URDF, calibration)
+    model = build_model(URDF, tmp_path / "model.xml", SERVOS[0], True)
+    data = mujoco.MjData(model)
+    for pose in ([0, 0, 0, 0, 0, 0], [-10, 12, -53, 41, -47, 1.4], [20, -80, 60, -30, 10, 30]):
+        values = dict(zip(JOINTS, pose, strict=True))
+        data.qpos[:] = [values[j] * gravity.scale[j] for j in JOINTS]
+        data.qvel[:] = 0
+        mujoco.mj_forward(model, data)
+        np.testing.assert_allclose(list(gravity.torque(values).values()), -data.qfrc_bias, atol=2e-6)

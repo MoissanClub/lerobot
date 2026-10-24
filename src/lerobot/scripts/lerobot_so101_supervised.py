@@ -17,6 +17,7 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.scripts.lerobot_align_so101 import JOINTS, connect_follower_holding_present_pose, read_positions
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 from lerobot.utils.joint_telemetry import JointTelemetryWriter
+from lerobot.utils.so101_capability_monitor import CapabilityMonitor, GravityModel, MonitorConfig
 from lerobot.utils.so101_motor_history import MotorStateHistory
 from lerobot.utils.so101_state_machine import Config, Controller, State
 
@@ -80,6 +81,26 @@ def replay(path, output, rest, bounds, cfg):
                 )
             count += 1
     print(json.dumps({"samples": count, "transitions": transitions, "output": str(output)}, indent=2))
+
+
+def pickup_guidance(leader, follower, tolerances):
+    joints = {
+        j: {
+            "leader": leader[j],
+            "follower_target": follower[j],
+            "move_leader_by": follower[j] - leader[j],
+            "tolerance": tolerances[j],
+            "aligned": abs(follower[j] - leader[j]) <= tolerances[j],
+        }
+        for j in JOINTS
+    }
+    count = sum(v["aligned"] for v in joints.values())
+    return {
+        "aligned_joints": count,
+        "total_joints": len(joints),
+        "hold_still": count == len(joints),
+        "joints": joints,
+    }
 
 
 class TerminalKeys:
@@ -162,6 +183,10 @@ def main():
     p.add_argument("--replay", type=Path)
     p.add_argument("--output", type=Path)
     p.add_argument("--silent", action="store_true")
+    p.add_argument("--no-capability-monitor", action="store_true")
+    p.add_argument(
+        "--capability-settings", type=Path, help="Advisory monitor JSON, separate from motion settings"
+    )
     args = p.parse_args()
     options = load_setup(args.config)
     calpath = options["robot"]["calibration_dir"] / (options["robot"]["id"] + ".json")
@@ -205,6 +230,36 @@ def main():
     if saved["follower_calibration_sha256"] != calibration_hash:
         p.error("Rest pose belongs to different calibration; capture a new rest pose")
     controller = Controller(saved["pose"], bounds, cfg)
+    capability = None
+    capability_config = {}
+    if not args.no_capability_monitor:
+        capability_config = (
+            json.loads(args.capability_settings.read_text()) if args.capability_settings else {}
+        )
+        model_path = Path(
+            capability_config.get(
+                "urdf",
+                Path(__file__).resolve().parents[3] / "simulation/so101_gravity/vendor/so101_new_calib.urdf",
+            )
+        )
+        gravity = GravityModel(
+            model_path, json.loads(calpath.read_text()), capability_config.get("offsets_deg")
+        )
+        capability = CapabilityMonitor(
+            gravity,
+            bounds,
+            MonitorConfig(**capability_config.get("monitor", {})),
+            capability_config.get("servo_models"),
+        )
+        capability_config = {
+            "urdf": str(model_path),
+            "urdf_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
+            "monitor": asdict(capability.config),
+            "servo_models": capability.models,
+            "offsets_deg": capability_config.get("offsets_deg", {}),
+            "advisory_only": True,
+        }
+
     if args.replay:
         if not args.output:
             p.error("--output required for replay")
@@ -245,6 +300,7 @@ def main():
             "source_revision": revision,
             "calibration_sha256": hashes,
             "recording": False,
+            "capability_monitor": capability_config if capability else {"enabled": False},
             "motor_history": {
                 "window_s": 3.0,
                 "register_interval_s": 0.05,
@@ -264,6 +320,8 @@ def main():
         leader.configure()
         connect_follower_holding_present_pose(robot)
         motor_history = MotorStateHistory(robot.bus)
+        capability_result = None
+        last_capability = float("-inf")
         last_display = 0
         last_status = 0
         latched_reported = False
@@ -294,6 +352,17 @@ def main():
                 diagnostic = motor_history.poll(time.monotonic())
                 if diagnostic is not None:
                     writer.submit({"type": "motor_register", **diagnostic})
+                if capability and tick - last_capability >= capability.config.interval_s:
+                    capability_result = capability.update(
+                        time.monotonic(),
+                        actual,
+                        target,
+                        controller.command or actual,
+                        motor_history.diagnostics.latest,
+                        active=controller.state in (State.LAGGING, State.TRACKING),
+                    )
+                    writer.submit(capability_result)
+                    last_capability = tick
                 transition_time = time.monotonic()
                 previous_command = dict(controller.command) if controller.command is not None else None
                 decision = controller.step(transition_time, target, actual, events, fault=motor_fault)
@@ -304,6 +373,7 @@ def main():
                             "previous": decision.previous,
                             "state": decision.state,
                             "reason": decision.reason,
+                            "capability": capability_result,
                             "leader": target,
                             "follower": actual,
                             "previous_command": previous_command,
@@ -323,6 +393,9 @@ def main():
                         "follower": actual,
                         "events": events,
                         "sent_action": sent,
+                        "pickup_guidance": pickup_guidance(target, actual, cfg.alignment)
+                        if decision.state == "awaiting_alignment"
+                        else None,
                         **asdict(decision),
                     }
                 )
@@ -331,6 +404,31 @@ def main():
                 if tick - last_display >= 0.5:
                     error_text = " ".join(f"{j}={v:+.1f}" for j, v in decision.errors.items())
                     print(f"{decision.state}: {error_text}", flush=True)
+                    if decision.state == "awaiting_alignment":
+                        guide = pickup_guidance(target, actual, cfg.alignment)
+                        print(
+                            f"PICKUP {guide['aligned_joints']}/{guide['total_joints']} aligned. Move LEADER toward live FOLLOWER:",
+                            flush=True,
+                        )
+                        for j, values in guide["joints"].items():
+                            if not values["aligned"]:
+                                print(
+                                    f"  {j}: leader {values['leader']:.1f} -> follower {values['follower_target']:.1f}; move leader {values['move_leader_by']:+.1f}",
+                                    flush=True,
+                                )
+                        if guide["hold_still"]:
+                            print("Aligned: hold leader still for resume dwell.", flush=True)
+                    if capability_result:
+                        warnings = [
+                            f"{j}:{v['prediction']}"
+                            for j, v in capability_result["joints"].items()
+                            if v["prediction"] != "no_warning"
+                        ]
+                        print(
+                            "CAPABILITY advisory: "
+                            + (" ".join(warnings) if warnings else "no warning; not a safety guarantee"),
+                            flush=True,
+                        )
                     last_display = tick
                 speaker.update(tick, decision.state)
                 if controller.state in (State.HALTED, State.FAULT) and not latched_reported:

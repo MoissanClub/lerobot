@@ -234,3 +234,15 @@ def test_idle_announces_stopping_once_per_entry():
     for now, state in [(0, "idle"), (0.1, "idle"), (6, "idle"), (7, "returning_to_rest"), (7.1, "idle")]:
         speaker.update(now, state)
     assert [r["text"] for r in log.records] == ["Stopping", "Stopping"]
+
+
+def test_pickup_guidance_points_leader_towards_current_follower():
+    leader = dict.fromkeys(runner.JOINTS, 0.0)
+    follower = dict.fromkeys(runner.JOINTS, 0.0)
+    follower["elbow_flex"] = 10
+    guide = runner.pickup_guidance(leader, follower, dict.fromkeys(runner.JOINTS, 1))
+    assert guide["aligned_joints"] == 5
+    assert guide["joints"]["elbow_flex"]["move_leader_by"] == 10
+    assert not guide["hold_still"]
+    leader["elbow_flex"] = 10
+    assert runner.pickup_guidance(leader, follower, dict.fromkeys(runner.JOINTS, 1))["hold_still"]
