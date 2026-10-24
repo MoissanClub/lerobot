@@ -63,3 +63,9 @@ Recording-gate integration remains future work. Reuse the Controller rather than
 Entering Tracking announces “Tracking” once, including pickup resume. It bypasses the repeating-warning cooldown, waits for an active short speech process to finish, and cancels if Tracking is left before delivery. Restart the runner to load code updates; a running process keeps its loaded version.
 
 Entering Idle announces “Stopping” once (including initial entry at rest and arrival after return-to-rest). It uses the same nonblocking state-entry delivery policy as “Tracking.”
+
+## Pre-alignment motor history
+
+The runner continuously rotates through Torque_Enable, Present_Current, Present_Load, Present_Temperature, Present_Voltage, Present_Velocity, Status and Moving for every follower motor. It performs at most one additional register read per eligible control cycle (minimum spacing .05s, so a full eight-register pass usually takes roughly .5s at 30Hz). Reads run on the existing serial-owner thread with no retries; errors remain explicit unavailable readings. Existing .5s fault polling is unchanged.
+
+Every Lagging → Awaiting alignment transition writes a `pre_alignment_motor_history` event into the same JSONL, containing the preceding 3s of register reads plus transition reason, positions, errors and previous commanded target. It covers nonprogress, calibrated-boundary and keyboard-disengage transitions from Lagging. Capturing the buffer requires no additional serial reads at the transition. `motor_register` records also preserve individual reads throughout the run. Values are timestamped separately, not simultaneous samples or calibrated torque measurements. If the transition occurs within the first 3s, `startup_truncated` marks incomplete history. Restart the runner to enable this logging; missing load/current cannot be reconstructed from earlier runs.

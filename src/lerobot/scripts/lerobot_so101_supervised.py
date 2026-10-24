@@ -17,6 +17,7 @@ from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.scripts.lerobot_align_so101 import JOINTS, connect_follower_holding_present_pose, read_positions
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
 from lerobot.utils.joint_telemetry import JointTelemetryWriter
+from lerobot.utils.so101_motor_history import MotorStateHistory
 from lerobot.utils.so101_state_machine import Config, Controller, State
 
 
@@ -244,6 +245,11 @@ def main():
             "source_revision": revision,
             "calibration_sha256": hashes,
             "recording": False,
+            "motor_history": {
+                "window_s": 3.0,
+                "register_interval_s": 0.05,
+                "trigger": "lagging_to_awaiting_alignment",
+            },
         },
     )
     speaker = Speaker(not args.silent, writer)
@@ -257,6 +263,7 @@ def main():
             raise RuntimeError("Leader calibration mismatch")
         leader.configure()
         connect_follower_holding_present_pose(robot)
+        motor_history = MotorStateHistory(robot.bus)
         last_display = 0
         last_status = 0
         latched_reported = False
@@ -284,7 +291,26 @@ def main():
                     if any(status.values()) or any(v != 1 for v in torque.values()):
                         motor_fault = "motor_status_or_torque_fault"
                     last_status = tick
-                decision = controller.step(time.monotonic(), target, actual, events, fault=motor_fault)
+                diagnostic = motor_history.poll(time.monotonic())
+                if diagnostic is not None:
+                    writer.submit({"type": "motor_register", **diagnostic})
+                transition_time = time.monotonic()
+                previous_command = dict(controller.command) if controller.command is not None else None
+                decision = controller.step(transition_time, target, actual, events, fault=motor_fault)
+                if decision.previous == "lagging" and decision.state == "awaiting_alignment":
+                    writer.submit(
+                        {
+                            "type": "pre_alignment_motor_history",
+                            "previous": decision.previous,
+                            "state": decision.state,
+                            "reason": decision.reason,
+                            "leader": target,
+                            "follower": actual,
+                            "previous_command": previous_command,
+                            "errors": decision.errors,
+                            **motor_history.snapshot(transition_time),
+                        }
+                    )
                 sent = None
                 if decision.command is not None:
                     sent = robot.send_action({f"{j}.pos": v for j, v in decision.command.items()})
