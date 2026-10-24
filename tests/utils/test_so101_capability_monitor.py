@@ -96,4 +96,21 @@ def test_broad_proximity_is_not_controller_boundary_and_inactive_is_not_outward_
     q = dict.fromkeys(JOINTS, 99.8)
     r = m.update(0.1, q, target, q, {}, active=False)
     assert not r["active_tracking"]
-    assert r["joints"]["gripper"]["prediction"] == "near_position_boundary"
+    assert r["joints"]["gripper"]["prediction"] == "no_warning"
+
+
+def test_position_proximity_warns_only_for_outward_request():
+    for q, inward, outward in [(99, 98, 100), (-99, -98, -100)]:
+        for target, expected in [
+            (q, "no_warning"),
+            (inward, "no_warning"),
+            (outward, "near_position_boundary"),
+        ]:
+            m = monitor()
+            measured = dict.fromkeys(JOINTS, q)
+            request = dict.fromkeys(JOINTS, target)
+            result = m.update(0, measured, request, measured, {})
+            joint = result["joints"]["shoulder_lift"]
+            assert joint["prediction"] == expected
+            assert joint["near_position_boundary"]
+            assert joint["requested_outward"] == (expected != "no_warning")

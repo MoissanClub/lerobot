@@ -200,6 +200,10 @@ class CapabilityMonitor:
             target = requested[j]
             margin = min(q - low, high - q)
             geometry = margin <= cfg.near_boundary_deg
+            outward_trend = active and (
+                (q >= high - cfg.near_boundary_deg and target > q + 0.1)
+                or (q <= low + cfg.near_boundary_deg and target < q - 0.1)
+            )
             outward = (q >= high - cfg.calibrated_boundary_tolerance and target > q + 0.1) or (
                 q <= low + cfg.calibrated_boundary_tolerance and target < q - 0.1
             )
@@ -233,7 +237,7 @@ class CapabilityMonitor:
                 else "possible_load_boundary"
                 if model_warning
                 else "near_position_boundary"
-                if geometry
+                if outward_trend
                 else "no_warning"
             )
             voltage = latest.get("Present_Voltage")
@@ -250,6 +254,8 @@ class CapabilityMonitor:
                 "gravity_torque_measured_nm": actual_g[j],
                 "gravity_torque_requested_nm": target_g[j],
                 "joint_margin": margin,
+                "near_position_boundary": geometry,
+                "requested_outward": outward_trend,
                 "margin_units": "opening_units" if j == "gripper" else "degrees",
                 "model_predictions": predictions,
                 "model_disagreement": len(
