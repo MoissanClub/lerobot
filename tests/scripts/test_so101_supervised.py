@@ -218,4 +218,19 @@ def test_tracking_waits_for_active_speech_and_cancels_if_state_changes():
     speaker.update(0.4, "idle")
     speaker.process = None
     speaker.update(0.5, "idle")
-    assert len(log.records) == 1
+    assert [r["text"] for r in log.records] == ["Tracking", "Stopping"]
+
+
+def test_idle_announces_stopping_once_per_entry():
+    class Log:
+        def __init__(self):
+            self.records = []
+
+        def submit(self, record):
+            self.records.append(record)
+
+    log = Log()
+    speaker = runner.Speaker(False, log)
+    for now, state in [(0, "idle"), (0.1, "idle"), (6, "idle"), (7, "returning_to_rest"), (7.1, "idle")]:
+        speaker.update(now, state)
+    assert [r["text"] for r in log.records] == ["Stopping", "Stopping"]

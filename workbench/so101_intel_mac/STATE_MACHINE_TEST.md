@@ -61,3 +61,5 @@ The first historical replay processed 1,347 samples: Lagging at sample 1, Awaiti
 Recording-gate integration remains future work. Reuse the Controller rather than reimplementing transitions inside record.py; define interrupted-frame semantics before enabling dataset recording.
 
 Entering Tracking announces “Tracking” once, including pickup resume. It bypasses the repeating-warning cooldown, waits for an active short speech process to finish, and cancels if Tracking is left before delivery. Restart the runner to load code updates; a running process keeps its loaded version.
+
+Entering Idle announces “Stopping” once (including initial entry at rest and arrival after return-to-rest). It uses the same nonblocking state-entry delivery policy as “Tracking.”
