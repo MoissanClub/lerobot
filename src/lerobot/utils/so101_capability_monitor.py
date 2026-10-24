@@ -96,6 +96,8 @@ class GravityModel:
 @dataclass
 class MonitorConfig:
     interval_s: float = 0.1
+    direction_interval_s: float = 0.5
+    direction_step: float = 2.0
     effort_window_s: float = 2.0
     effort_dwell_s: float = 0.7
     max_effort_age_s: float = 0.8
@@ -157,6 +159,8 @@ class CapabilityMonitor:
         self.unavailable = set()
         self.suspect_since = {}
         self.last_time = None
+        self.direction_cache = None
+        self.direction_time = None
 
     def update(self, now, measured, requested, sent, latest, active=True):
         cfg = self.config
@@ -166,6 +170,9 @@ class CapabilityMonitor:
             for channels in self.effort.values():
                 for records in channels.values():
                     records.clear()
+        if not active:
+            self.direction_cache = None
+            self.direction_time = None
         self.last_time = now
         if not active:
             self.samples.clear()
@@ -277,7 +284,29 @@ class CapabilityMonitor:
             }
             if reason != "no_warning":
                 flagged.append(j)
+        if active and (self.direction_cache is None or now - self.direction_time >= cfg.direction_interval_s):
+            self.direction_cache = self.restricted_directions(measured, actual_g)
+            self.direction_time = now
+        direction_advisories = []
+        if active and self.direction_cache:
+            for moving, directions in self.direction_cache.items():
+                delta = requested[moving] - measured[moving]
+                name = "increase" if delta > 0.1 else "decrease" if delta < -0.1 else None
+                if name and directions[name]["limiting"]:
+                    direction_advisories.append(
+                        {
+                            "moving_joint": moving,
+                            "direction": name,
+                            "limiting": directions[name]["limiting"],
+                            "advisory_only": True,
+                        }
+                    )
         return {
+            "direction_predictions": self.direction_cache,
+            "direction_prediction_age_s": now - self.direction_time
+            if self.direction_time is not None
+            else None,
+            "direction_advisories": direction_advisories,
             "type": "capability_monitor",
             "monotonic_s": now,
             "advisory_only": True,
@@ -287,6 +316,45 @@ class CapabilityMonitor:
             "joints": joints,
             "assumptions": "nominal rated torque and exploratory stiffness; no dynamic torque, voltage derating, contact or compensation",
         }
+
+    def restricted_directions(self, measured, baseline=None):
+        baseline = baseline or self.gravity.torque(measured)
+        result = {}
+        cfg = self.config
+        for moving in JOINTS:
+            result[moving] = {}
+            for label, sign in (("increase", 1), ("decrease", -1)):
+                candidate = dict(measured)
+                candidate[moving] += sign * cfg.direction_step
+                torque = self.gravity.torque(candidate)
+                limiting = []
+                for affected in JOINTS:
+                    increase = abs(torque[affected]) - abs(baseline[affected])
+                    if increase <= cfg.load_increase_tolerance_nm:
+                        continue
+                    models = []
+                    for name, model in self.models.items():
+                        utilization = abs(torque[affected]) / model["continuous_torque_nm"]
+                        error = math.degrees(abs(torque[affected]) / model["stiffness_nm_rad"])
+                        if utilization >= cfg.utilization_warning or error >= cfg.accuracy_limit_deg:
+                            models.append(name)
+                    if models:
+                        limiting.append(
+                            {
+                                "affected_joint": affected,
+                                "models": models,
+                                "gravity_increase_nm": increase,
+                                "trial_gravity_nm": torque[affected],
+                            }
+                        )
+                result[moving][label] = {
+                    "step": sign * cfg.direction_step,
+                    "limiting": limiting,
+                    "candidate_outside_calibrated_range": not self.bounds[moving][0]
+                    <= candidate[moving]
+                    <= self.bounds[moving][1],
+                }
+        return result
 
     def _pattern(self, j, now, measured, sent, active):
         cfg = self.config

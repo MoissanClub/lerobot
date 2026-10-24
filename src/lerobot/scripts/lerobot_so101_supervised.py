@@ -86,9 +86,15 @@ def replay(path, output, rest, bounds, cfg):
 def capability_display_signature(result, state):
     if result is None or state not in ("tracking", "lagging") or not result.get("active_tracking", False):
         return None
-    return tuple(
+    messages = [
         f"{j}:{v['prediction']}" for j, v in result["joints"].items() if v["prediction"] != "no_warning"
-    )
+    ]
+    for advisory in result.get("direction_advisories", []):
+        affected = ",".join(sorted({r["affected_joint"] for r in advisory["limiting"]}))
+        messages.append(
+            f"avoid {advisory['direction']} {advisory['moving_joint']} (predicted load limit: {affected})"
+        )
+    return tuple(messages)
 
 
 def pickup_guidance(leader, follower, tolerances):

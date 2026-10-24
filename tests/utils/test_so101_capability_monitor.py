@@ -144,3 +144,25 @@ def test_load_boundary_advisory_requires_increasing_absolute_gravity_demand():
             0, dict.fromkeys(JOINTS, 0), dict.fromkeys(JOINTS, 1), dict.fromkeys(JOINTS, 0), {}, active=False
         )
         assert result["joints"]["shoulder_lift"]["prediction"] == "no_warning"
+
+
+def test_direction_prediction_identifies_cross_joint_limit_and_allows_unloading():
+    class CoupledGravity:
+        def torque(self, pose):
+            result = dict.fromkeys(JOINTS, 0.0)
+            result["shoulder_lift"] = 0.5 + 0.02 * pose["wrist_flex"]
+            return result
+
+    m = CapabilityMonitor(CoupledGravity(), dict.fromkeys(JOINTS, (-100, 100)))
+    measured = dict.fromkeys(JOINTS, 0)
+    result = m.restricted_directions(measured)
+    increase = result["wrist_flex"]["increase"]["limiting"]
+    assert increase[0]["affected_joint"] == "shoulder_lift"
+    assert increase[0]["models"] == ["7p4v"]
+    assert not result["wrist_flex"]["decrease"]["limiting"]
+    request = dict(measured)
+    request["wrist_flex"] = 3
+    report = m.update(0, measured, request, measured, {})
+    assert report["direction_advisories"][0]["moving_joint"] == "wrist_flex"
+    assert not m.update(0.1, measured, measured, measured, {})["direction_advisories"]
+    assert m.update(0.2, measured, request, measured, {}, active=False)["direction_predictions"] is None
