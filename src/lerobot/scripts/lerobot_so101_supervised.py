@@ -107,8 +107,13 @@ class Speaker:
         self.enabled, self.log, self.process = enabled, log, None
         self.last, self.last_message = float("-inf"), None
         self.reported = True
+        self.state = None
+        self.tracking_pending = False
 
     def update(self, now, state):
+        if state != self.state:
+            self.tracking_pending = state == "tracking"
+            self.state = state
         if self.process and self.process.poll() is not None and not self.reported:
             self.log.submit(
                 {
@@ -119,9 +124,18 @@ class Speaker:
                 }
             )
             self.reported = True
-        text = {"lagging": "Slow down", "awaiting_alignment": "Pick up"}.get(state)
-        if not text or now - self.last < 5 or (self.process and self.process.poll() is None):
+        text = (
+            "Tracking"
+            if self.tracking_pending
+            else {"lagging": "Slow down", "awaiting_alignment": "Pick up"}.get(state)
+        )
+        if (
+            not text
+            or (not self.tracking_pending and now - self.last < 5)
+            or (self.process and self.process.poll() is None)
+        ):
             return
+        self.tracking_pending = False
         self.last, self.last_message = now, text
         print(f"PROMPT: {text}", flush=True)
         self.log.submit(

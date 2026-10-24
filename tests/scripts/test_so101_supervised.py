@@ -165,3 +165,57 @@ def test_hardware_loop_with_fake_buses(monkeypatch, tmp_path, serial_failure):
         assert any(r.get("type") == "fault" for r in records)
     assert instances[0].bus.released
     assert all(not d.bus.is_connected for d in instances)
+
+
+def test_tracking_announced_once_on_each_entry_bypassing_repeat_cooldown():
+    class Log:
+        def __init__(self):
+            self.records = []
+
+        def submit(self, record):
+            self.records.append(record)
+
+    log = Log()
+    speaker = runner.Speaker(False, log)
+    for now, state in [
+        (0, "lagging"),
+        (0.1, "tracking"),
+        (0.2, "tracking"),
+        (6, "tracking"),
+        (7, "awaiting_alignment"),
+        (7.1, "tracking"),
+    ]:
+        speaker.update(now, state)
+    prompts = [r["text"] for r in log.records if r["type"] == "prompt_request"]
+    assert prompts == ["Slow down", "Tracking", "Pick up", "Tracking"]
+
+
+def test_tracking_waits_for_active_speech_and_cancels_if_state_changes():
+    class Log:
+        def __init__(self):
+            self.records = []
+
+        def submit(self, record):
+            self.records.append(record)
+
+    class Process:
+        returncode = 0
+
+        def poll(self):
+            return None
+
+    log = Log()
+    speaker = runner.Speaker(False, log)
+    speaker.process = Process()
+    speaker.update(0, "tracking")
+    assert not log.records
+    speaker.process = None
+    speaker.update(0.1, "tracking")
+    assert log.records[-1]["text"] == "Tracking"
+    speaker.update(0.2, "lagging")
+    speaker.process = Process()
+    speaker.update(0.3, "tracking")
+    speaker.update(0.4, "idle")
+    speaker.process = None
+    speaker.update(0.5, "idle")
+    assert len(log.records) == 1

@@ -59,3 +59,5 @@ Replay injects Start at the first observed sample and uses recorded measurements
 The first historical replay processed 1,347 samples: Lagging at sample 1, Awaiting alignment at sample 1073 for shoulder/elbow nonprogress. It used a synthetic zero rest only for offline initialization, not as a physical rest recommendation. First recorded elbow position lay beyond the calibrated endpoint, while the leader requested inward motion; the outward-boundary guard correctly did not trigger merely for being outside/near the endpoint.
 
 Recording-gate integration remains future work. Reuse the Controller rather than reimplementing transitions inside record.py; define interrupted-frame semantics before enabling dataset recording.
+
+Entering Tracking announces “Tracking” once, including pickup resume. It bypasses the repeating-warning cooldown, waits for an active short speech process to finish, and cancels if Tracking is left before delivery. Restart the runner to load code updates; a running process keeps its loaded version.
