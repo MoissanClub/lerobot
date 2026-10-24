@@ -1,0 +1,27 @@
+{
+  "servo": {
+    "name": "7p4v",
+    "voltage_v": 7.4,
+    "stall_torque_kgcm": 19.5,
+    "no_load_s_per_60deg": 0.192,
+    "stall_current_a": 2.5,
+    "nominal_kt_kgcm_a": 7.8
+  },
+  "gravity": true,
+  "p_register": 16,
+  "i_register": 0,
+  "d_register": 32,
+  "assumed_derivative_sample_s": 0.001,
+  "gain_scale": 1.0,
+  "friction_nm": 0.0,
+  "offsets_deg": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+  ],
+  "controller": "simulate.py:pwm",
+  "model_xml": "7p4v_gravity_on.xml"
+}

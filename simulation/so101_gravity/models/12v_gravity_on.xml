@@ -1,0 +1,38 @@
+<mujoco model="so101_new_calib">
+  <compiler angle="radian"/>
+
+  <option timestep="0.001" integrator="implicitfast"/>
+
+  <worldbody>
+    <body name="base_link">
+      <inertial pos="0.0137179 -5.19711e-05 0.0334843" quat="0.420519 0.558762 0.57198 0.428704" mass="0.147" diaginertia="0.000136127 0.000131807 0.000113233"/>
+      <body name="shoulder_link" pos="0.0388353 -8.97657e-09 0.0624" quat="1.76036e-12 1.32679e-06 -1 -1.32679e-06">
+        <inertial pos="-0.0307604 -1.66727e-05 -0.0252713" quat="0.999865 0.00149563 0.0097084 0.0132043" mass="0.100006" diaginertia="8.37836e-05 8.10388e-05 2.39552e-05"/>
+        <joint name="shoulder_pan" pos="0 0 0" axis="0 0 1" range="-1.91986 1.91986" actuatorfrcrange="-10 10" armature="0.0001" damping="0.623686"/>
+        <body name="upper_arm_link" pos="-0.0303992 -0.0182778 -0.0542" quat="0.499998 -0.5 -0.5 -0.500002">
+          <inertial pos="-0.0898471 -0.00838224 0.0184089" quat="0.453195 0.454063 0.541891 0.542951" mass="0.103" diaginertia="0.000150873 0.000142487 3.72451e-05"/>
+          <joint name="shoulder_lift" pos="0 0 0" axis="0 0 1" range="-1.74533 1.74533" actuatorfrcrange="-10 10" armature="0.0001" damping="0.623686"/>
+          <body name="lower_arm_link" pos="-0.11257 -0.028 0" quat="0.707105 0 0 0.707108">
+            <inertial pos="-0.0980701 0.00324376 0.0182831" quat="0.510729 0.517006 0.487966 0.483477" mass="0.104" diaginertia="0.000160262 0.000145304 2.83125e-05"/>
+            <joint name="elbow_flex" pos="0 0 0" axis="0 0 1" range="-1.69 1.69" actuatorfrcrange="-10 10" armature="0.0001" damping="0.623686"/>
+            <body name="wrist_link" pos="-0.1349 0.0052 0" quat="0.707105 0 0 -0.707108">
+              <inertial pos="-0.000103312 -0.0386143 0.0281156" quat="0.967143 0.254226 0.00162226 -0.000146307" mass="0.079" diaginertia="3.68265e-05 2.74474e-05 1.89434e-05"/>
+              <joint name="wrist_flex" pos="0 0 0" axis="0 0 1" range="-1.65806 1.65806" actuatorfrcrange="-10 10" armature="0.0001" damping="0.623686"/>
+              <body name="gripper_link" pos="0 -0.0611 0.0181" quat="0.0172101 -0.0172081 0.706899 0.706896">
+                <inertial pos="0.000213627 0.000245138 -0.025187" quat="0.600717 0.355993 0.35863 0.61951" mass="0.087" diaginertia="4.33735e-05 3.77229e-05 2.42839e-05"/>
+                <joint name="wrist_roll" pos="0 0 0" axis="0 0 1" range="-2.74385 2.84121" actuatorfrcrange="-10 10" armature="0.0001" damping="0.623686"/>
+                <body name="gripper_frame_link" pos="-0.0079 -0.000218121 -0.0981274" quat="1.32679e-06 0 1 0">
+                  <inertial pos="0 0 0" mass="1e-09" diaginertia="0 0 0"/>
+                </body>
+                <body name="moving_jaw_so101_v1_link" pos="0.0202 0.0188 -0.0234" quat="0.707105 0.707108 -1.85362e-08 1.85363e-08">
+                  <inertial pos="-0.00157495 -0.0300244 0.0192755" quat="0.695265 0.717965 -0.0245618 -0.0230097" mass="0.012" diaginertia="6.63582e-06 5.29092e-06 1.86523e-06"/>
+                  <joint name="gripper" pos="0 0 0" axis="0 0 1" range="-0.174533 1.74533" actuatorfrcrange="-10 10" armature="0.0001" damping="0.623686"/>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
