@@ -17,6 +17,7 @@ from pathlib import Path
 
 from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
+from lerobot.utils.so101_motor_diagnostics import MotorDiagnostics, diagnostic_value
 
 ARM_JOINTS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll")
 JOINTS = (*ARM_JOINTS, "gripper")
@@ -61,7 +62,7 @@ def connect_follower_holding_present_pose(robot):
     return position
 
 
-def display(state, elapsed, target, live, actual, motor_goal, errors):
+def display(state, elapsed, target, live, actual, motor_goal, errors, motor_states=None):
     if sys.stdout.isatty():
         print("\033[2J\033[H", end="")
     print(f"{state} | {elapsed:.1f}s | fixed target; Enter/Ctrl+C exits and releases follower torque")
@@ -71,7 +72,40 @@ def display(state, elapsed, target, live, actual, motor_goal, errors):
             f"{joint:<17} {target[joint]:9.2f} {live[joint]:9.2f} {actual[joint]:9.2f} "
             f"{motor_goal[joint]:11.2f} {errors[joint]:9.2f}"
         )
-    print("Arm values: degrees. Gripper: calibrated 0–100 opening units.", flush=True)
+    print("Arm values: degrees. Gripper: calibrated 0–100 opening units.")
+    if motor_states is not None:
+        print("\nFollower motor states (raw register values; fields refreshed separately):")
+        print(f"{'joint':<17} {'torque':>7} {'current':>8} {'load':>8} {'temp':>7} {'status':>8}")
+        for joint in JOINTS:
+            values = []
+            for register in (
+                "Torque_Enable",
+                "Present_Current",
+                "Present_Load",
+                "Present_Temperature",
+                "Status",
+            ):
+                value = diagnostic_value(motor_states, register, joint)
+                values.append(
+                    "N/A" if value is None else (hex(value) if register == "Status" else str(value))
+                )
+            print(f"{joint:<17} {values[0]:>7} {values[1]:>8} {values[2]:>8} {values[3]:>7} {values[4]:>8}")
+
+        def elbow(register):
+            value = diagnostic_value(motor_states, register, "elbow_flex")
+            return "N/A" if value is None else str(value)
+
+        print(
+            "Elbow P/I/D="
+            + "/".join(elbow(r) for r in ("P_Coefficient", "I_Coefficient", "D_Coefficient"))
+            + "  dead zones CW/CCW="
+            + "/".join(elbow(r) for r in ("CW_Dead_Zone", "CCW_Dead_Zone"))
+        )
+        failed = [name for name, record in motor_states.items() if record["error"]]
+        if failed:
+            print("Unavailable diagnostic registers: " + ", ".join(failed))
+        print("Raw current/load/temperature/status are not converted or interpreted as motor faults.")
+    sys.stdout.flush()
 
 
 def main():
@@ -87,6 +121,12 @@ def main():
     parser.add_argument("--max-start-error-deg", type=float, default=30.0)
     parser.add_argument("--hold-gripper", action="store_true", help="Keep gripper at its starting opening")
     parser.add_argument("--log-dir", type=Path)
+    parser.add_argument(
+        "--motor-state-interval-s",
+        type=float,
+        default=0.15,
+        help="Minimum interval between individual diagnostic register reads",
+    )
     args = parser.parse_args()
     for name in (
         "speed_deg_s",
@@ -96,6 +136,7 @@ def main():
         "settle_s",
         "timeout_s",
         "max_start_error_deg",
+        "motor_state_interval_s",
     ):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             parser.error(f"{name} must be finite and positive")
@@ -173,10 +214,35 @@ def main():
             half_range = (cal.range_max - cal.range_min) / 2 * 360 / 4095
             if abs(target[joint]) > half_range:
                 raise RuntimeError(f"{joint} target lies outside follower's calibrated range")
+        follower_diagnostics = MotorDiagnostics(robot.bus, args.motor_state_interval_s)
+        leader_diagnostics = MotorDiagnostics(leader.bus, args.motor_state_interval_s)
+        with logpath.open("a") as diagnostic_log:
+            diagnostic_log.write(
+                json.dumps(
+                    {
+                        "type": "motor_configuration_snapshot",
+                        "units": "raw_register_units_after_driver_sign_decode",
+                        "follower": follower_diagnostics.snapshot(),
+                        "leader": leader_diagnostics.snapshot(),
+                    }
+                )
+                + "\n"
+            )
         live = read_positions(leader)
-        errors, _, _ = alignment_errors(target, live, start_pose, args.tolerance_deg, args.gripper_tolerance)
+        initial_actual = read_positions(robot)
+        initial_goal = robot.bus.sync_read("Goal_Position")
+        errors, _, _ = alignment_errors(
+            target, live, initial_actual, args.tolerance_deg, args.gripper_tolerance
+        )
         display(
-            "INITIAL SNAPSHOT — NOT YET MOVING TO LEADER", 0, target, live, start_pose, start_pose, errors
+            "INITIAL SNAPSHOT — NOT YET MOVING TO LEADER",
+            0,
+            target,
+            live,
+            initial_actual,
+            initial_goal,
+            errors,
+            follower_diagnostics.latest,
         )
         with logpath.open("a") as snapshot_log:
             snapshot_log.write(
@@ -184,7 +250,8 @@ def main():
                     {
                         "type": "initial_snapshot",
                         "target": target,
-                        "follower": start_pose,
+                        "follower": initial_actual,
+                        "motor_goal_readback": initial_goal,
                         "leader_live": live,
                         "errors": errors,
                     }
@@ -223,6 +290,9 @@ def main():
                 if elapsed - last_goal_read >= 0.5:
                     motor_goal = robot.bus.sync_read("Goal_Position")
                     last_goal_read = elapsed
+                diagnostic = follower_diagnostics.poll(time.monotonic())
+                if diagnostic is not None:
+                    log.write(json.dumps({"type": "motor_state", "arm": "follower", **diagnostic}) + "\n")
                 errors, follower_ok, leader_ok = alignment_errors(
                     target, live, actual, args.tolerance_deg, args.gripper_tolerance, args.hold_gripper
                 )
@@ -259,7 +329,9 @@ def main():
                     + "\n"
                 )
                 if elapsed - last_print >= 0.5:
-                    display(state, elapsed, target, live, actual, motor_goal, errors)
+                    display(
+                        state, elapsed, target, live, actual, motor_goal, errors, follower_diagnostics.latest
+                    )
                     log.flush()
                     last_print = elapsed
                 if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:

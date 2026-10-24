@@ -90,8 +90,12 @@ def test_full_alignment_session_freezes_leader_goal_logs_and_disconnects(tmp_pat
         def disable_torque(self):
             pass
 
-        def sync_read(self, name):
-            return (self.position if name == "Present_Position" else self.goal).copy()
+        def sync_read(self, name, **kwargs):
+            if name == "Present_Position":
+                return self.position.copy()
+            if name == "Goal_Position":
+                return self.goal.copy()
+            return dict.fromkeys(alignment.JOINTS, 1)
 
         def sync_write(self, name, value):
             self.goal = value.copy()
@@ -154,7 +158,11 @@ def test_full_alignment_session_freezes_leader_goal_logs_and_disconnects(tmp_pat
         "aligned_seen": mode == "tracking",
     }
     assert all(not device.bus.is_connected for device in created)
-    assert rows[1]["target"] == pose(1)
+    assert next(r for r in rows if r["type"] == "initial_snapshot")["target"] == pose(1)
+    assert next(r for r in rows if r["type"] == "initial_snapshot")["motor_goal_readback"] == pose(0)
+    snapshot = next(r for r in rows if r["type"] == "motor_configuration_snapshot")
+    assert snapshot["follower"]["Torque_Enable"]["values"]["elbow_flex"] == 1
+    assert snapshot["leader"]["Torque_Enable"]["error"] is None
     assert all(r["commanded_goal"]["elbow_flex"] <= 1 for r in rows if r["type"] == "sample")
 
 
