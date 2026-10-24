@@ -109,6 +109,7 @@ class MonitorConfig:
     progress_limit_deg: float = 0.5
     near_boundary_deg: float = 2.0
     calibrated_boundary_tolerance: float = 0.5
+    load_increase_tolerance_nm: float = 0.01
     utilization_warning: float = 0.8
     accuracy_limit_deg: float = 5.0
     minimum_command_motion_deg: float = 0.5
@@ -226,7 +227,11 @@ class CapabilityMonitor:
             pattern["sustained"] = (
                 j in self.suspect_since and now - self.suspect_since[j] >= cfg.effort_dwell_s
             )
-            model_warning = any(p["torque_warning"] or p["accuracy_warning"] for p in predictions.values())
+            load_change = abs(target_g[j]) - abs(actual_g[j])
+            increasing_load = active and load_change > cfg.load_increase_tolerance_nm
+            model_warning = increasing_load and any(
+                p["torque_warning"] or p["accuracy_warning"] for p in predictions.values()
+            )
             reason = (
                 "calibrated_position_boundary"
                 if outward and active
@@ -253,6 +258,8 @@ class CapabilityMonitor:
             joints[j] = {
                 "gravity_torque_measured_nm": actual_g[j],
                 "gravity_torque_requested_nm": target_g[j],
+                "requested_gravity_load_change_nm": load_change,
+                "requested_increasing_load": increasing_load,
                 "joint_margin": margin,
                 "near_position_boundary": geometry,
                 "requested_outward": outward_trend,

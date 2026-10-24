@@ -63,7 +63,7 @@ def test_positive_progress_and_stale_effort_clear_prediction():
 def test_geometry_and_model_only_predictions_have_explicit_reasons():
     class LoadedGravity:
         def torque(self, pose):
-            return dict.fromkeys(JOINTS, 0.6)
+            return {j: 0.6 + 0.02 * pose[j] for j in JOINTS}
 
     m = CapabilityMonitor(LoadedGravity(), dict.fromkeys(JOINTS, (-100, 100)))
     q = dict.fromkeys(JOINTS, 0)
@@ -114,3 +114,33 @@ def test_position_proximity_warns_only_for_outward_request():
             assert joint["prediction"] == expected
             assert joint["near_position_boundary"]
             assert joint["requested_outward"] == (expected != "no_warning")
+
+
+def test_load_boundary_advisory_requires_increasing_absolute_gravity_demand():
+    class LoadedGravity:
+        def __init__(self, sign):
+            self.sign = sign
+
+        def torque(self, pose):
+            return {j: self.sign * (0.6 + 0.02 * pose[j]) for j in JOINTS}
+
+    for sign in (-1, 1):
+        for request, expected in [
+            (0, "no_warning"),
+            (-1, "no_warning"),
+            (0.1, "no_warning"),
+            (1, "possible_load_boundary"),
+        ]:
+            m = CapabilityMonitor(LoadedGravity(sign), dict.fromkeys(JOINTS, (-100, 100)))
+            measured = dict.fromkeys(JOINTS, 0)
+            target = dict.fromkeys(JOINTS, request)
+            result = m.update(0, measured, target, measured, {})
+            joint = result["joints"]["shoulder_lift"]
+            assert joint["prediction"] == expected
+            assert joint["requested_increasing_load"] == (expected != "no_warning")
+            assert joint["model_predictions"]["7p4v"]["torque_warning"]
+        m = CapabilityMonitor(LoadedGravity(sign), dict.fromkeys(JOINTS, (-100, 100)))
+        result = m.update(
+            0, dict.fromkeys(JOINTS, 0), dict.fromkeys(JOINTS, 1), dict.fromkeys(JOINTS, 0), {}, active=False
+        )
+        assert result["joints"]["shoulder_lift"]["prediction"] == "no_warning"
