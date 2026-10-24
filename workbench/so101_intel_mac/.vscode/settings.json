@@ -1,0 +1,20 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/lerobot-src/src"
+  ],
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.cwd": "${workspaceFolder}/lerobot-src",
+  "python.testing.pytestArgs": [
+    "tests/robots/test_so100_follower.py",
+    "tests/processor/test_policy_robot_bridge.py",
+    "tests/scripts/test_edit_dataset_parsing.py"
+  ],
+  "files.watcherExclude": {
+    "**/.venv/**": true,
+    "**/.cache/**": true,
+    "**/.python/**": true,
+    "**/recordings/**": true
+  }
+}

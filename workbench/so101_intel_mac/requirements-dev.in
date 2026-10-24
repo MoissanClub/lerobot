@@ -1,0 +1,4 @@
+-e ./lerobot-src[pusht,feetech,test]
+debugpy>=1.8.1,<1.9
+ruff>=0.14,<0.15
+pre-commit>=3.7,<5

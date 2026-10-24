@@ -1,0 +1,7 @@
+.venv/
+.python/
+.tools/
+.cache/
+__pycache__/
+*.log
+recordings/

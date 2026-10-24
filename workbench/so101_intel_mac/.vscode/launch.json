@@ -1,0 +1,70 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "name": "PushT simulation (no hardware)",
+      "program": "${workspaceFolder}/teleop_pusht.py",
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ]
+    },
+    {
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "name": "SO101 teleoperation with cameras",
+      "program": "${workspaceFolder}/so101_dev.py",
+      "args": [
+        "teleop"
+      ],
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ]
+    },
+    {
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "name": "SO101 record locally",
+      "program": "${workspaceFolder}/so101_dev.py",
+      "args": [
+        "record",
+        "--dataset.repo_id=local/${input:datasetName}",
+        "--dataset.root=${workspaceFolder}/recordings/${input:datasetName}",
+        "--dataset.single_task=${input:task}",
+        "--dataset.num_episodes=2",
+        "--dataset.episode_time_s=30",
+        "--dataset.reset_time_s=10"
+      ],
+      "pythonArgs": [
+        "-Xfrozen_modules=off"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "datasetName",
+      "type": "promptString",
+      "description": "New dataset name (use a different name for each run)",
+      "default": "so101_trial01"
+    },
+    {
+      "id": "task",
+      "type": "promptString",
+      "description": "Task performed in these demonstrations",
+      "default": "Pick up the block"
+    }
+  ]
+}

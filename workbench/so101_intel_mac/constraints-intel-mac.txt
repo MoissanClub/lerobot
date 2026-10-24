@@ -1,0 +1,14 @@
+# Intel macOS: last available matching PyTorch/torchvision wheels.
+# torchvision overrides LeRobot 0.4.4's >=0.21 requirement; see INSTALLATION.txt.
+torch==2.2.2
+torchvision==0.17.2
+# PyTorch 2.2 wheels use the NumPy 1.x ABI.
+numpy==1.26.4
+# Newer OpenCV builds require NumPy 2.
+opencv-python-headless==4.11.0.86
+# Rerun >=0.23 requires NumPy 2; override LeRobot's >=0.24 requirement.
+rerun-sdk==0.22.1
+# New PyArrow wheels require NumPy 2 at runtime.
+pyarrow==21.0.0
+# gym-pusht also installs the non-headless OpenCV distribution.
+opencv-python==4.11.0.86

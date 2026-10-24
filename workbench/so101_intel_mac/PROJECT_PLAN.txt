@@ -1,0 +1,277 @@
+Session checkpoint 2026-10-23
+-----------------------------
+Implemented on lab/so101-intel-warning-20261023: short angle-error warning, telemetry and offline velocity-based estimates, fixed-snapshot alignment and motor-state diagnostics. Audible warning physically observed. Catch-up ETA accuracy and threshold selection remain unresolved. Keyboard/microphone recording gates, prebuffer and pickup recovery remain planned; no physical recording test completed in this session. See private labbook session 2026-10-23-so101-reassembly-warning for hypotheses and next tests.
+
+SO101 Teleoperation and Recording Improvements
+=============================================
+Created: 2026-10-21
+Status: Planning; proposed features below are not implemented.
+Workspace: /Users/dwei/lerobot
+Development guide: DEVELOPMENT.txt
+Source: lerobot-src/ (v0.4.4, branch so101demo)
+
+Objective
+---------
+Make collecting SO101 demonstrations easier: maintain live leader/follower
+teleoperation and camera previews while the operator explicitly chooses when
+to start, finish, or discard each recording episode.
+
+Current baseline
+----------------
+- Editable LeRobot source and local Python environment are installed.
+- SO101 leader/follower teleoperation has been verified by the operator.
+- Two USB cameras have passed simultaneous 640x480, 30 fps capture checks.
+- Shared hardware configuration: configs/so101.json.
+- Local launcher: so101_dev.py, with teleop and record modes.
+- Development tooling includes pytest, Ruff, debugpy and VS Code launch profiles.
+- Existing validation includes 46 selected upstream tests, simulation checks,
+  CLI startup and a synthetic two-camera video recording round-trip.
+- The new physical recording workflow has not been validated on hardware.
+- Intel Mac compatibility pins and the Rerun shim must remain supported.
+
+Feature F1: Operator-controlled recording during teleoperation
+------------------------------------------------------------
+Priority: P0 / first development feature.
+Status: Planned.
+
+User story:
+As an operator, I want to position and move the robot continuously, then mark
+recording boundaries with a key, so I can collect demonstrations without timed
+record/reset phases or restarting teleoperation between episodes.
+
+Workflow:
+1. Start the session in READY: teleoperation and both previews are active;
+   no demonstration frames are added to an episode.
+2. START begins an episode and changes state to RECORDING.
+3. FINISH closes that episode's frame buffer and schedules it for saving.
+4. Return to READY while teleoperation and previews continue.
+5. DISCARD drops an active episode without incrementing the saved count.
+6. EXIT ends the session after resolving any active episode and pending saves.
+
+Control state and save-job status should be separate: a save must not force a
+pause in motor control. The initial version may reject START while a previous
+save is pending, with a clear busy indicator; it must keep teleoperation live.
+
+Proposed keyboard mapping (confirm during implementation):
+- Space: START in READY; FINISH in RECORDING.
+- Backspace: DISCARD the active episode.
+- Escape: EXIT request.
+- Ctrl+C: interrupt and perform best-effort cleanup.
+
+Implementation approach:
+- Extend the recording workflow rather than add a second dataset writer to
+  lerobot_teleoperate.py. Expose it through the existing local launcher.
+- Keep the existing timed recording mode available and unchanged by default.
+- Introduce an explicit operator-controlled mode with a small state machine.
+- Route input events through a thread-safe queue and consume them at control
+  loop boundaries; input callbacks must not write datasets or drive motors.
+- Keep a long-lived teleoperation loop; gate dataset.add_frame() by state.
+- Snapshot episode data before handing it to a save worker. Define exclusive
+  dataset/writer ownership; do not concurrently mutate the same episode buffer.
+- Bound outstanding save work and report saving/error status. Do not silently
+  drop recording frames or report success before data is committed.
+- Detect key press edges and suppress repeats to avoid double transitions.
+- Display state, episode identifier, duration, saved count and pending save status.
+- Announce accepted state transitions using existing log_say/play_sounds.
+  Speech stays outside the per-frame path and is optional/non-blocking.
+
+Boundary and exit semantics:
+- START includes frames from the next accepted capture boundary; FINISH closes
+  the buffer before the next captured frame. Document this convention.
+- Assign monotonically ordered frame indices and episode-relative timestamps.
+- Reject an empty episode explicitly; invalid/duplicate events are harmless.
+- If EXIT is requested during recording, ask the operator to finish-and-save
+  or discard; maintain teleoperation until that choice is resolved.
+- Flush accepted save jobs on orderly exit. On write failure, expose the error
+  and preserve recoverable data; do not claim an episode was saved.
+- Keep existing disconnect/torque behavior and document it in operator guidance.
+
+Acceptance criteria:
+- Collect three episodes in one session without reconnecting either arm.
+- Robot tracking and previews continue between episodes and during saving.
+- Only frames inside accepted START/FINISH boundaries enter saved episodes.
+- DISCARD leaves the saved episode count unchanged.
+- State transitions are visible; speech can be disabled with play_sounds=false.
+- Held keys, duplicate commands, empty episodes and save failures are handled.
+- Saved data loads through LeRobotDataset with both camera streams and actions.
+- Measure control-loop timing during saving against the current 30 Hz baseline;
+  agree on a regression threshold before implementation is considered complete.
+
+Feature F2: Microphone input for the same recording controls
+----------------------------------------------------------
+Priority: P1 / after keyboard workflow is stable.
+Status: Planned; speech engine is not selected.
+
+- Add an optional microphone adapter that emits the same START, FINISH,
+  DISCARD and EXIT events as the keyboard adapter.
+- Proposed phrases: "start recording", "finish episode", "discard episode".
+- Run recognition outside the control loop. Keep keyboard control available.
+- Evaluate recognition latency, reliability and CPU cost on this Intel Mac.
+- Prefer a local recognition option; cloud processing requires a separate
+  decision about credentials, connectivity and microphone audio handling.
+- Provide explicit acknowledgments and reject ambiguous commands. Prevent
+  spoken system prompts from triggering recognition, e.g. push-to-talk.
+- Include microphone permission/setup guidance and an unavailable-mic fallback.
+
+Acceptance criteria:
+- Spoken and keyboard events produce identical state transitions in tests.
+- Recognition delays or failures do not interrupt motor control or recording.
+- Prompts do not trigger unintended commands; keyboard remains functional.
+
+Feature F3: Optional frames before the start command
+--------------------------------------------------
+Priority: P2 / optional follow-up, not required for F1.
+Status: Proposed.
+
+- Maintain a bounded rolling buffer while READY and prepend a configurable
+  interval when START is accepted, to compensate for input/reaction latency.
+- Define camera/action alignment, timestamp rebasing and memory limits.
+- Default off; show clearly when the feature is enabled.
+
+Feature F4: Estimated catch-up time and spoken lag warning
+--------------------------------------------------------
+Priority: P1 / following the keyboard recording foundation.
+Status: Planned; estimator and thresholds require validation on this SO101.
+
+User story:
+As an operator, I want a spoken warning when the follower is estimated to need
+one second or more to reach the leader's current pose, so I can slow down or
+pause my movement without watching joint telemetry continuously.
+
+Definition and assumptions:
+- Estimate time to reach the CURRENT leader pose, assuming the leader stops
+  moving now. This is not a prediction of the leader's future motion or a
+  measurement of a one-second delay between motion histories.
+- Reaching a pose means all monitored joints are within configured position
+  tolerances, rather than mathematically exact equality.
+- Estimate time for each joint; use the maximum as the arm-level estimate,
+  initially assuming joints can move simultaneously. Validate that assumption
+  under coupled motion, load and the actual motor/controller settings.
+- A starting approximation is remaining error outside tolerance divided by
+  expected closing speed. Account for acceleration/deceleration as the model
+  is refined; instantaneous measured speed alone is not a reliable estimator.
+- Use calibrated joint coordinates, configured joint limits and consistent
+  units. Angular joints and the normalized gripper need separate profiles.
+- Use the original leader-requested target and measured follower state for
+  mismatch monitoring, even when max_relative_target clips motor commands.
+  Include any configured clipping in the predicted convergence model.
+
+Estimator and feedback:
+- Establish initial joint-speed profiles from controlled measurements with
+  representative loads. Refine with filtered velocity toward the target.
+- Distinguish an empirical expected-time prediction from a theoretical lower
+  bound based on maximum speed. Do not label the lower bound as expected time.
+- Report confidence/availability; do not show a precise numeric ETA when the
+  motion model, calibration or state measurements cannot support one.
+- Handle stopped, blocked, moving-away and stale-feedback cases explicitly.
+  Persistent error without progress produces a separate "not converging"
+  condition rather than division by zero or a misleading finite ETA.
+- Trigger an advisory at estimated catch-up time >=1.0 seconds, configurable.
+  Require a short configurable persistence interval across consecutive samples
+  to reject noise; that debounce is separate from the one-second ETA threshold.
+- Proposed announcement: "Follower lagging, slow down." For sustained lack of
+  progress, use a distinct message such as "Follower not catching up."
+- Display estimated time, confidence/status, limiting joint and current error.
+- Add hysteresis for warning clearance and an announcement cooldown (initial
+  proposal: five seconds). Avoid queued or overlapping speech messages.
+- Run speech asynchronously through the shared audio mechanism, respecting
+  play_sounds=false and preventing prompts from triggering F2 voice commands.
+- Share monitoring between teleop and record modes, including READY/RECORDING.
+  Read available loop observations rather than adding avoidable serial polls.
+- Initial behavior is advisory only: it does not automatically stop motors,
+  alter targets, or pause/discard an episode. Show/log warning events and their
+  timestamps for later dataset-quality review.
+
+Acceptance criteria:
+- Synthetic trajectories cover known speeds, acceleration, multiple joints,
+  noise, clipping, zero speed, moving away and stale measurements.
+- Test tolerance handling, warning threshold, persistence, hysteresis, cooldown,
+  unavailable estimates and the separate not-converging condition.
+- On hardware, freeze the leader target and compare predictions with measured
+  time to enter tolerance under representative poses and loads. Agree on an
+  accuracy envelope and supported operating conditions before enabling advice.
+- The one-second threshold refers to predicted catch-up duration, not elapsed
+  time above a position-error threshold.
+- Warnings and estimator work do not block the control loop; compare loop
+  timing and audio latency against the existing 30 Hz baseline.
+- Operator trials verify that warnings are understandable and not repetitive;
+  warnings remain visible when speech is disabled.
+
+Feature F5: Pickup mode after follower/leader divergence
+-------------------------------------------------------
+Priority: After the threshold measurement experiment; not implemented.
+
+- Reuse the pickup concept referenced by the G1 VR lab history: suspend following,
+  guide operator alignment, then resume without a target jump.
+- G1 reference: sessions/2026-10-15-g1-vr-camera/session.md in the labbook,
+  code reference 4d9d9724 (work/g1-vr-physical). That record reports virtual
+  jump-free transitions; physical hold/recovery was not validated there.
+- For SO101, distinguish normal lag from persistent error with little progress.
+  An obstruction is one possible cause, not something position error alone proves.
+- Determine and validate how to hold/support the follower without continuing to
+  push into an obstacle; do not blindly latch an unreachable old leader target.
+- While in pickup mode, ignore leader movement as a follower target and prompt
+  the operator to align the leader to the measured follower pose.
+- Require all relevant joints to be within configured tolerances for a dwell
+  interval and explicit operator resume. Use fresh feedback and handle stale data.
+- Distinguish pickup from torque-off, fault, physical obstruction clearance and
+  emergency stop. Never automatically reverse or force through an obstruction.
+- Define recording boundaries: pickup motion must not silently contaminate a
+  demonstration; mark, pause or discard the interrupted episode explicitly.
+- Validate first with mocks/simulation, then supervised clear-space physical
+  alignment; do not deliberately block/stall the follower for a test.
+
+Milestones and validation
+-------------------------
+M1. Design and baseline
+    Inspect recording/control utilities; choose state/event boundaries and save
+    ownership. Measure existing loop timing and document transition semantics.
+M2. Keyboard-controlled recording
+    Implement F1 behind an explicit mode; add state display and speech prompts.
+    Reuse calibration, cameras, dataset schema and the local-only upload default.
+M3. Automated validation
+    Unit-test transitions and event handling with mocked inputs/motors. Test
+    boundaries, discard, shutdown, queued saves, errors and episode numbering.
+    Extend the synthetic two-camera round-trip to multiple operator events.
+    Run make test, make lint and make check.
+M4. Operator validation on SO101
+    Verify continuous following, camera previews, keyboard permissions, episode
+    integrity and loop timing during saves. Hardware runs are separate from
+    automated checks and require an operator at the arms.
+M5. Optional microphone adapter
+    Select/evaluate recognition, implement F2, then test recognition separately
+    before connecting voice events to a physical session.
+M6. Optional pre-start buffer
+    Implement F3 only after the basic workflow and timing are validated.
+M7. Catch-up estimator and advisory (F4)
+    After M4, characterize joint motion, implement/test the shared estimator,
+    then validate predictions and spoken warnings with an operator. This work
+    does not depend on completing optional M5 or M6.
+
+Likely implementation locations
+-------------------------------
+lerobot-src/src/lerobot/scripts/lerobot_record.py
+    Session state, recording gates and episode/save coordination; F4 integration.
+lerobot-src/src/lerobot/scripts/lerobot_teleoperate.py
+    F4 integration into continuous teleoperation.
+lerobot-src/src/lerobot/utils/ (new shared monitoring module)
+    Catch-up estimator, warning state and non-blocking audio dispatch.
+lerobot-src/src/lerobot/robots/so_follower/so_follower.py
+    Inspect target clipping and returned motor commands for estimator inputs.
+lerobot-src/src/lerobot/utils/control_utils.py
+    Input events and keyboard listener integration.
+lerobot-src/src/lerobot/datasets/lerobot_dataset.py
+    Inspect buffer and writer lifecycle; change only if required for safe saves.
+lerobot-src/tests/
+    Focused state, mocked recording and dataset round-trip tests.
+so101_dev.py, configs/so101.json, .vscode/launch.json
+    Expose the new mode and configurable controls in local development tools.
+DEVELOPMENT.txt
+    Operator commands, recording semantics, permissions and troubleshooting.
+
+Scope boundaries
+----------------
+This plan does not include policy training, autonomous robot movement, changes
+to motor IDs/calibration, or automatic dataset uploads. Upgrading LeRobot or
+PyTorch is a separate compatibility project. No implementation or hardware
+session is started by creating this plan.

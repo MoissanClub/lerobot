@@ -1,0 +1,95 @@
+Local LeRobot environment for this Intel Mac
+===========================================
+
+Activate from /Users/dwei/lerobot:
+    source .venv/bin/activate
+
+Python 3.11 and uv are installed inside this directory (.python/ and .tools/).
+No Homebrew packages or system Python packages were installed.
+
+Compatibility choices:
+- LeRobot 0.4.4; current LeRobot 0.6.1 needs torch >=2.7.
+- PyTorch 2.2.2 and torchvision 0.17.2 are the last matching Intel Mac wheels.
+- NumPy 1.26.4 avoids the NumPy 2 ABI incompatibility with PyTorch 2.2.
+- OpenCV 4.11.0.86 accepts NumPy 1.x.
+- Rerun 0.22.1 accepts NumPy 1.x.
+- TorchCodec is excluded by LeRobot's Intel macOS platform marker; use PyAV.
+
+This is an experimental CPU compatibility environment, not a fully supported
+LeRobot dependency combination. LeRobot declares torchvision >=0.21 and
+rerun-sdk >=0.24; both are explicitly overridden. `uv pip check` reports these
+two known mismatches. No installed package metadata or source was modified.
+Newer policy features may need newer PyTorch APIs. CLI help and imports do not
+validate training, hardware operation, camera access, or complete workflows.
+
+Reinstall with the same compatibility overrides:
+    UV_CACHE_DIR="$PWD/.cache/uv" .tools/uv pip install --python .venv/bin/python -r requirements.in --override constraints-intel-mac.txt
+
+An exact installed package snapshot is in requirements-intel-mac.lock.
+Run verification:
+    .venv/bin/python -u verify_install.py
+CLI output is saved to individual lerobot-*.log files.
+
+Sources:
+https://huggingface.co/docs/lerobot/installation
+https://pypi.org/pypi/lerobot/0.4.4/json
+https://dev-discuss.pytorch.org/t/pytorch-macos-x86-builds-deprecation-starting-january-2024/1690
+
+Additional pin:
+- PyArrow 21.0.0 supports NumPy 1.x; PyArrow 26.0.0 failed import with
+  "pyarrow requires NumPy 2.0 or newer" despite passing dependency resolution.
+
+Verification notes:
+- Native PyArrow CPU feature probes print sandbox sysctl permission warnings;
+  dataset imports still succeed.
+- CUDA and MPS are unavailable on this machine; use --policy.device=cpu when
+  selecting a policy for training or inference.
+- PyAV provides video libraries, and imageio-ffmpeg includes an FFmpeg binary;
+  there is no system FFmpeg command on PATH.
+
+Verification passed:
+- Imports: NumPy, PyTorch, torchvision, PyAV, OpenCV, datasets, Rerun,
+  LeRobot, LeRobotDataset, and ACTPolicy.
+- CPU matrix multiplication.
+- lerobot-info startup.
+- --help startup for lerobot-train, lerobot-eval, lerobot-record,
+  lerobot-replay, lerobot-calibrate, lerobot-teleoperate,
+  and lerobot-find-cameras.
+All eight CLI checks exited 0. See verification.log and individual CLI logs.
+
+Local mouse teleoperation simulation (no hardware)
+-------------------------------------------------
+PushT is installed via LeRobot's pusht extra. Start from this directory:
+    .venv/bin/python teleop_pusht.py
+Hold the left mouse button in the window to move the blue circular pusher.
+Push the T-shaped block onto the green target. R resets; Esc quits.
+This launcher uses LeRobot's PushtEnv, make_env, and preprocess_observation
+with the local gym-pusht physics environment. It tests simulation and LeRobot
+observation processing, not an SO101 hardware driver or a learned policy.
+
+Automated check without opening a desktop window:
+    .venv/bin/python teleop_pusht.py --check
+Output: verification-pusht.log
+
+SO101 physical teleoperation with both USB cameras
+-------------------------------------------------
+    .venv/bin/python teleop_so101_cameras.py
+This command enables physical follower movement and opens Rerun camera views.
+Stop any previous teleoperation process with Ctrl+C before running it.
+Uses the calibrated IDs leader and follower, the previously identified USB
+ports, and OpenCV camera indices 0 and 1 at 640x480, 30 fps. Both cameras were
+tested simultaneously through LeRobot's OpenCVCamera and delivered frames.
+Camera indices may change when devices are reconnected.
+
+The launcher adapts Rerun's newer Scalars name to the older Scalar API in
+Rerun 0.22.1; no installed package files are modified.
+Hardware-free display logging check:
+    .venv/bin/python teleop_so101_cameras.py --check
+
+Development environment (editable source)
+----------------------------------------
+The active environment now imports LeRobot from lerobot-src/src/lerobot on
+branch so101demo (v0.4.4). See DEVELOPMENT.txt for source files,
+VS Code debugging, tests, shared SO101 config and local recording commands.
+Use make install-dev to update the development environment while retaining
+Intel overrides. The original hardware launchers continue to use this source.

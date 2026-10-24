@@ -1,0 +1,18 @@
+{
+  "robot": {
+    "type": "so101_follower",
+    "port": "/dev/cu.usbmodem5AE60801371",
+    "id": "follower",
+    "cameras": {
+      "camera_0": {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30},
+      "camera_1": {"type": "opencv", "index_or_path": 1, "width": 640, "height": 480, "fps": 30}
+    }
+  },
+  "teleop": {
+    "type": "so101_leader",
+    "port": "/dev/cu.usbmodem5AE60548171",
+    "id": "leader"
+  },
+  "display_data": true,
+  "fps": 30
+}

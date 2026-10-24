@@ -1,0 +1,186 @@
+SO101 teleoperation and recording development
+===========================================
+
+Workspace: /Users/dwei/lerobot
+Source repository: lerobot-src/
+Upstream: https://github.com/huggingface/lerobot.git
+Base: v0.4.4, commit 8fff0fde7c79f23a93d845d1a50e985de01f8b8a
+Working branch: so101demo
+Fork remote: https://github.com/MoissanClub/lerobot.git (named fork)
+Remote branch creation is pending authentication; so101demo currently exists locally.
+The checkout is shallow. Fetch more history if you need to compare older commits.
+
+Start
+-----
+    cd /Users/dwei/lerobot
+    source .venv/bin/activate
+
+LeRobot is installed editable from lerobot-src/src/lerobot. Editing Python
+source takes effect the next time you start a process; no reinstall is needed.
+The existing teleop_so101_cameras.py launcher still works against this source.
+
+The root directory contains local tools/configuration. Git operations for
+LeRobot code belong inside lerobot-src:
+    git -C lerobot-src status
+    git -C lerobot-src diff
+No commits have been created. The upstream source is initially unmodified.
+
+Files to edit
+-------------
+lerobot-src/src/lerobot/scripts/lerobot_teleoperate.py
+    Main teleoperation loop, timing, actions, observation display.
+lerobot-src/src/lerobot/scripts/lerobot_record.py
+    Recording loop, episode/reset flow, dataset options and saving.
+lerobot-src/src/lerobot/utils/control_utils.py
+    Right/left arrow and Escape recording controls.
+lerobot-src/src/lerobot/robots/so_follower/
+    Follower connection, motor actions and camera observations.
+lerobot-src/src/lerobot/teleoperators/so_leader/
+    Leader connection and joint position reads.
+lerobot-src/src/lerobot/datasets/lerobot_dataset.py
+    Dataset frame buffering, episode writes and finalization.
+configs/so101.json
+    Shared ports, calibrated IDs, cameras, frame rate and display settings.
+so101_dev.py
+    Local teleop/record launcher and Intel Rerun compatibility shim.
+
+Development checks
+------------------
+    make test
+    make lint
+    make check
+
+make test runs 46 selected upstream tests for the mocked SO follower, action
+conversion and dataset CLI parsing. These tests do not connect to real motors.
+make check verifies imports and CLI startup, PushT simulation, display logging,
+configuration parsing, and synthetic two-camera dataset recording/reloading.
+verify_recording.py records eight synthetic frames, encodes two H.264 videos,
+then reloads and decodes them with PyAV. Its temporary data is cleaned up.
+These checks do not validate physical recording, macOS keyboard permissions,
+or a live viewer window.
+
+Do not run the entire upstream test suite blindly: some tests contact hardware,
+download models/datasets, or need optional policies and accelerators.
+Upstream pre-commit defaults to Python 3.10, which is not installed here; use
+make lint with the provided Python 3.11 environment for the focused workflow.
+
+Run hardware teleoperation
+--------------------------
+Stop any existing teleop/record process first. Place the arms in similar poses
+with room to move. The following enables physical follower movement:
+    python so101_dev.py teleop
+
+Check configuration without hardware:
+    python so101_dev.py teleop --check
+
+Record a short local dataset
+---------------------------
+Use a new dataset name/root for each new run:
+    python so101_dev.py record \
+      --dataset.repo_id=local/so101_trial01 \
+      --dataset.root="$PWD/recordings/so101_trial01" \
+      --dataset.single_task="Pick up the block" \
+      --dataset.num_episodes=2 \
+      --dataset.episode_time_s=30 \
+      --dataset.reset_time_s=10
+
+The launcher defaults to push_to_hub=false and H.264 video encoding. No Hub
+login is required. Recording enables physical follower movement. Press right
+arrow to finish the current phase, left arrow to rerecord the episode, and
+Escape to finish recording. macOS may require Accessibility/Input Monitoring
+permission for the terminal or editor to receive these keyboard events.
+Avoid debugging pauses with the robot holding an object; the follower retains
+its last commanded position while execution is paused. Ctrl+C exits hardware
+teleoperation and disables follower torque, so support the arm when stopping.
+
+VS Code
+-------
+Open /Users/dwei/lerobot as the workspace. The .vscode settings select the local
+interpreter and source import paths. Run and Debug has launch configurations
+for PushT, physical teleoperation, and local recording. The recording launcher
+asks for dataset name/task. Breakpoints in lerobot-src/src/lerobot work with
+justMyCode=false. The same source edits also apply from a normal terminal.
+
+Dependencies and reproducibility
+--------------------------------
+    make install-dev
+
+requirements-dev.in installs the editable source, test extras, pytest tools,
+debugpy, Ruff and pre-commit. constraints-intel-mac.txt preserves the working
+Intel dependencies. requirements-development.lock snapshots this environment.
+requirements-before-development.lock captures the previous wheel installation.
+Existing requirements.in still describes the non-development wheel setup;
+do not install it over the editable install unless you intend to switch back.
+
+Python 3.11.17, PyTorch 2.2.2, torchvision 0.17.2, NumPy 1.26.4, PyArrow 21,
+Rerun 0.22.1 and OpenCV 4.11 are retained. Current LeRobot main requires newer
+PyTorch, so this branch deliberately uses the tested v0.4.4 base. Two known
+metadata conflicts remain: LeRobot's minimum torchvision and Rerun versions.
+The launcher maps Rerun Scalars to Scalar without modifying installed packages.
+
+Calibration remains in the existing ~/.cache/huggingface/lerobot/calibration
+files for leader/follower; no motor IDs or calibration were changed by setup.
+Camera indices can change after reconnecting devices; update configs/so101.json.
+
+Setup validation
+----------------
+Passed: 46 selected upstream tests, focused Ruff checks, editable import path,
+eight CLI startup checks, PushT stepping/rendering, two-camera display logging,
+teleop/record configuration parsing, and synthetic video recording round-trip.
+See development-check.log and verification-recording.log. The dependency check
+reports only the two previously documented Intel compatibility overrides.
+No physical teleoperation or recording was started during environment setup.
+
+Initial SO101 alignment and inspection
+-------------------------------------
+    python align_so101.py
+
+Uses the session-specific post-reassembly calibration and USB ports, no cameras.
+The first Enter connects/configures the arms with the follower supported. Before
+holding torque is enabled, its current measured position seeds the motor goal.
+The initial difference table appears before a second Enter authorizes the gradual
+move toward the captured leader pose. Keep the leader still: its subsequent
+movement never changes the fixed target. This is a diagnostic, not live teleop.
+
+Live columns: captured target, current leader, measured follower, motor-stored
+Goal_Position readback, and target-minus-follower error. Readback refreshes every
+0.5 seconds; the 20 Hz loop logs its timestamp separately. ALIGNED requires all
+five arm joints within 1 degree, gripper within 3 opening units, and the leader
+still close to the captured target, sustained for 1 second after the ramp.
+
+Defaults: goal slew <=5 degrees/s on the arm and <=10 normalized opening units/s
+on the gripper. These are command limits, not guaranteed physical speed limits.
+Initial arm mismatch >30 degrees or a target outside the follower calibration
+range aborts the check. The gripper may close; remove grasped objects first.
+Use --hold-gripper to keep its initial opening instead.
+
+Enter or Ctrl+C stops. The check also ends after 30 seconds (--timeout-s changes
+this), and disconnect disables follower torque. Support the follower at exit.
+A persistent residual prints SETTLING and ends as not aligned (exit code 2).
+The script does not force alignment, tune gains, recalibrate, or start teleop.
+There is no seamless powered handoff to another process; releasing torque may
+change the pose before a subsequent teleop connection.
+
+Logs: outputs/lab/so101-20261023/alignment/*.jsonl, with calibration hashes,
+source revision, initial snapshot, goal readback and live tracking data.
+Hardware-free config check:
+    python align_so101.py --check
+
+Motor states in alignment inspection
+------------------------------------
+The same python align_so101.py command now records startup configuration snapshots
+for both arms and refreshes follower motor-state fields during alignment. The live
+table includes Torque_Enable, Present_Current, Present_Load, Present_Temperature
+and Status, plus elbow PID/dead zones. Configuration logs include limits, homing
+offset, torque/protection settings, goal velocity and acceleration. Voltage,
+measured velocity and Moving are logged during the run as well.
+
+Diagnostic reads use normalize=false and zero retries. Values are raw register
+units after driver sign decoding; current/load/voltage/status are not converted
+to physical units or interpreted as faults. Each field has read start/end times,
+duration and error. Unsupported/failed reads become unavailable, never zero.
+The optional state sampler reads at most one register per loop, with 0.15 seconds
+minimum between reads (--motor-state-interval-s), about 1.2+ seconds for all eight
+dynamic registers. Fields are not simultaneous; use their timestamps when analyzing.
+No background thread accesses the serial bus. Startup snapshots are taken while
+holding the initial pose, before the second operator prompt starts the ramp.
