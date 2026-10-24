@@ -71,7 +71,7 @@ def test_geometry_and_model_only_predictions_have_explicit_reasons():
     r = m.update(0, q, target, q, {})
     assert r["joints"]["shoulder_lift"]["prediction"] == "possible_load_boundary"
     assert r["joints"]["shoulder_lift"]["model_disagreement"]
-    q = dict.fromkeys(JOINTS, 99)
+    q = dict.fromkeys(JOINTS, 99.8)
     target = dict.fromkeys(JOINTS, 101)
     r = m.update(0.1, q, target, q, {})
     assert r["joints"]["shoulder_lift"]["prediction"] == "calibrated_position_boundary"
@@ -85,3 +85,15 @@ def test_gravity_is_gradient_of_potential_and_pan_is_zero():
     assert abs(result["shoulder_pan"]) < 1e-4
     assert result["shoulder_lift"] > 0.3
     assert all(np.isfinite(v) for v in result.values())
+
+
+def test_broad_proximity_is_not_controller_boundary_and_inactive_is_not_outward_alarm():
+    m = monitor()
+    q = dict.fromkeys(JOINTS, 98.5)
+    target = dict.fromkeys(JOINTS, 100)
+    r = m.update(0, q, target, q, {})
+    assert r["joints"]["gripper"]["prediction"] == "near_position_boundary"
+    q = dict.fromkeys(JOINTS, 99.8)
+    r = m.update(0.1, q, target, q, {}, active=False)
+    assert not r["active_tracking"]
+    assert r["joints"]["gripper"]["prediction"] == "near_position_boundary"

@@ -108,6 +108,7 @@ class MonitorConfig:
     minimum_current: float = 5.0
     progress_limit_deg: float = 0.5
     near_boundary_deg: float = 2.0
+    calibrated_boundary_tolerance: float = 0.5
     utilization_warning: float = 0.8
     accuracy_limit_deg: float = 5.0
     minimum_command_motion_deg: float = 0.5
@@ -199,8 +200,8 @@ class CapabilityMonitor:
             target = requested[j]
             margin = min(q - low, high - q)
             geometry = margin <= cfg.near_boundary_deg
-            outward = (q >= high - cfg.near_boundary_deg and target > q + 0.1) or (
-                q <= low + cfg.near_boundary_deg and target < q - 0.1
+            outward = (q >= high - cfg.calibrated_boundary_tolerance and target > q + 0.1) or (
+                q <= low + cfg.calibrated_boundary_tolerance and target < q - 0.1
             )
             predictions = {}
             for name, model in self.models.items():
@@ -224,7 +225,7 @@ class CapabilityMonitor:
             model_warning = any(p["torque_warning"] or p["accuracy_warning"] for p in predictions.values())
             reason = (
                 "calibrated_position_boundary"
-                if outward
+                if outward and active
                 else "load_and_response_warning"
                 if model_warning and pattern["sustained"]
                 else "suspected_response_boundary"
@@ -267,6 +268,7 @@ class CapabilityMonitor:
             "type": "capability_monitor",
             "monotonic_s": now,
             "advisory_only": True,
+            "active_tracking": active,
             "prediction": "possible_operational_boundary" if flagged else "no_warning_not_proof_of_safety",
             "flagged_joints": flagged,
             "joints": joints,

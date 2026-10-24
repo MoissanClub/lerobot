@@ -83,6 +83,14 @@ def replay(path, output, rest, bounds, cfg):
     print(json.dumps({"samples": count, "transitions": transitions, "output": str(output)}, indent=2))
 
 
+def capability_display_signature(result, state):
+    if result is None or state not in ("tracking", "lagging") or not result.get("active_tracking", False):
+        return None
+    return tuple(
+        f"{j}:{v['prediction']}" for j, v in result["joints"].items() if v["prediction"] != "no_warning"
+    )
+
+
 def pickup_guidance(leader, follower, tolerances):
     joints = {
         j: {
@@ -321,6 +329,7 @@ def main():
         connect_follower_holding_present_pose(robot)
         motor_history = MotorStateHistory(robot.bus)
         capability_result = None
+        last_capability_display = None
         last_capability = float("-inf")
         last_display = 0
         last_status = 0
@@ -418,17 +427,14 @@ def main():
                                 )
                         if guide["hold_still"]:
                             print("Aligned: hold leader still for resume dwell.", flush=True)
-                    if capability_result:
-                        warnings = [
-                            f"{j}:{v['prediction']}"
-                            for j, v in capability_result["joints"].items()
-                            if v["prediction"] != "no_warning"
-                        ]
+                    signature = capability_display_signature(capability_result, decision.state)
+                    if signature is not None and signature != last_capability_display:
                         print(
                             "CAPABILITY advisory: "
-                            + (" ".join(warnings) if warnings else "no warning; not a safety guarantee"),
+                            + (" ".join(signature) if signature else "warnings cleared"),
                             flush=True,
                         )
+                    last_capability_display = signature
                     last_display = tick
                 speaker.update(tick, decision.state)
                 if controller.state in (State.HALTED, State.FAULT) and not latched_reported:
