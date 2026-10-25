@@ -117,6 +117,18 @@ def pickup_guidance(leader, follower, tolerances):
     }
 
 
+def motor_monitor_warning(status, torque):
+    status_faults = {joint: value for joint, value in status.items() if value}
+    torque_faults = {joint: value for joint, value in torque.items() if value != 1}
+    if not status_faults and not torque_faults:
+        return None
+    return {
+        "status": status_faults,
+        "torque_enable": torque_faults,
+        "behavior": "report_only",
+    }
+
+
 class TerminalKeys:
     def __enter__(self):
         self.original = termios.tcgetattr(sys.stdin)
@@ -339,6 +351,7 @@ def main():
         last_capability = float("-inf")
         last_display = 0
         last_status = 0
+        last_motor_warning = None
         latched_reported = False
         with TerminalKeys() as keyboard:
             while True:
@@ -349,20 +362,26 @@ def main():
                 actual = read_positions(robot)
                 actual_time = time.monotonic()
                 target = read_positions(leader)
-                motor_fault = None
                 if tick - last_status >= 0.5:
                     status = robot.bus.sync_read("Status", normalize=False, num_retry=0)
                     torque = robot.bus.sync_read("Torque_Enable", normalize=False, num_retry=0)
+                    warning = motor_monitor_warning(status, torque)
                     writer.submit(
                         {
                             "type": "motor_state",
                             "monotonic_s": time.monotonic(),
                             "status": status,
                             "torque_enable": torque,
+                            "warning": warning,
                         }
                     )
-                    if any(status.values()) or any(v != 1 for v in torque.values()):
-                        motor_fault = "motor_status_or_torque_fault"
+                    signature = json.dumps(warning, sort_keys=True) if warning else None
+                    if signature != last_motor_warning:
+                        if warning:
+                            print(f"MOTOR MONITOR WARNING (report only): {warning}", flush=True)
+                        elif last_motor_warning is not None:
+                            print("MOTOR MONITOR: warning cleared", flush=True)
+                        last_motor_warning = signature
                     last_status = tick
                 diagnostic = motor_history.poll(time.monotonic())
                 if diagnostic is not None:
@@ -380,7 +399,9 @@ def main():
                     last_capability = tick
                 transition_time = time.monotonic()
                 previous_command = dict(controller.command) if controller.command is not None else None
-                decision = controller.step(transition_time, target, actual, events, fault=motor_fault)
+                # Match upstream teleoperation semantics: motor status is reported but does not
+                # alter the control state or suppress leader actions.
+                decision = controller.step(transition_time, target, actual, events)
                 if decision.previous == "lagging" and decision.state == "awaiting_alignment":
                     writer.submit(
                         {

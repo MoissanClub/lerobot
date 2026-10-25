@@ -37,8 +37,11 @@ def test_replay_uses_observed_joints_and_records_decisions(tmp_path):
         runner.replay(source, output, dict.fromkeys(joints, 0), dict.fromkeys(joints, (-100, 100)), cfg)
 
 
-@pytest.mark.parametrize("serial_failure", [False, True])
-def test_hardware_loop_with_fake_buses(monkeypatch, tmp_path, serial_failure):
+@pytest.mark.parametrize(
+    ("serial_failure", "motor_status"),
+    [(False, 0), (True, 0), (False, 32)],
+)
+def test_hardware_loop_with_fake_buses(monkeypatch, tmp_path, serial_failure, motor_status):
     """Exercise the real runner: keyboard, read/send, telemetry and cleanup without USB."""
     joints = runner.JOINTS
     state = {j: 0.0 if j != "gripper" else 50.0 for j in joints}
@@ -93,7 +96,10 @@ def test_hardware_loop_with_fake_buses(monkeypatch, tmp_path, serial_failure):
             self.released = disable_torque
 
         def sync_read(self, register, **kwargs):
-            return dict.fromkeys(joints, 1 if register == "Torque_Enable" else 0)
+            values = dict.fromkeys(joints, 1 if register == "Torque_Enable" else 0)
+            if register == "Status":
+                values["elbow_flex"] = motor_status
+            return values
 
     class Device:
         is_calibrated = True
@@ -163,8 +169,31 @@ def test_hardware_loop_with_fake_buses(monkeypatch, tmp_path, serial_failure):
             r.get("type") == "exception_hold" and r["result"] == "recent_measured_pose_sent" for r in records
         )
         assert any(r.get("type") == "fault" for r in records)
+    if motor_status:
+        monitored = [r for r in records if r.get("type") == "motor_state" and r.get("warning")]
+        assert monitored
+        assert monitored[0]["warning"] == {
+            "status": {"elbow_flex": motor_status},
+            "torque_enable": {},
+            "behavior": "report_only",
+        }
+        assert not any(r.get("state") == "fault" for r in records)
     assert instances[0].bus.released
     assert all(not d.bus.is_connected for d in instances)
+
+
+def test_motor_monitor_warning_reports_status_and_torque_without_control_decision():
+    assert runner.motor_monitor_warning({"elbow_flex": 32}, {"elbow_flex": 1}) == {
+        "status": {"elbow_flex": 32},
+        "torque_enable": {},
+        "behavior": "report_only",
+    }
+    assert runner.motor_monitor_warning({"elbow_flex": 0}, {"elbow_flex": 0}) == {
+        "status": {},
+        "torque_enable": {"elbow_flex": 0},
+        "behavior": "report_only",
+    }
+    assert runner.motor_monitor_warning({"elbow_flex": 0}, {"elbow_flex": 1}) is None
 
 
 def test_tracking_announced_once_on_each_entry_bypassing_repeat_cooldown():
