@@ -196,6 +196,14 @@ def test_motor_monitor_warning_reports_status_and_torque_without_control_decisio
     assert runner.motor_monitor_warning({"elbow_flex": 0}, {"elbow_flex": 1}) is None
 
 
+def test_trial_config_uses_fifteen_degree_pickup_exit_for_rotary_joints():
+    cfg = runner.trial_config()
+    assert cfg.pickup_alignment == {
+        joint: 3.0 if joint == "gripper" else 15.0 for joint in runner.JOINTS
+    }
+    assert cfg.alignment == {joint: 3.0 if joint == "gripper" else 1.5 for joint in runner.JOINTS}
+
+
 def test_tracking_announced_once_on_each_entry_bypassing_repeat_cooldown():
     class Log:
         def __init__(self):

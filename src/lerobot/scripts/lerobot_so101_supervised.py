@@ -51,6 +51,7 @@ def bounds_from_calibration(calibration):
 def trial_config():
     return Config(
         alignment={j: 3.0 if j == "gripper" else 1.5 for j in JOINTS},
+        pickup_alignment={j: 3.0 if j == "gripper" else 15.0 for j in JOINTS},
         lag={j: 6.0 if j == "gripper" else 5.0 for j in JOINTS},
         speed={j: 10.0 if j == "gripper" else 5.0 for j in JOINTS},
         acceleration={j: 20.0 if j == "gripper" else 10.0 for j in JOINTS},
@@ -429,7 +430,7 @@ def main():
                         "follower": actual,
                         "events": events,
                         "sent_action": sent,
-                        "pickup_guidance": pickup_guidance(target, actual, cfg.alignment)
+                        "pickup_guidance": pickup_guidance(target, actual, cfg.pickup_alignment)
                         if decision.state == "awaiting_alignment"
                         else None,
                         **asdict(decision),
@@ -441,7 +442,7 @@ def main():
                     error_text = " ".join(f"{j}={v:+.1f}" for j, v in decision.errors.items())
                     print(f"{decision.state}: {error_text}", flush=True)
                     if decision.state == "awaiting_alignment":
-                        guide = pickup_guidance(target, actual, cfg.alignment)
+                        guide = pickup_guidance(target, actual, cfg.pickup_alignment)
                         print(
                             f"PICKUP {guide['aligned_joints']}/{guide['total_joints']} aligned. Move LEADER toward live FOLLOWER:",
                             flush=True,

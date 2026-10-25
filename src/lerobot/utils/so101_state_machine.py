@@ -23,6 +23,7 @@ class Config:
     lag: dict
     speed: dict
     acceleration: dict
+    pickup_alignment: dict | None = None
     dwell_s: float = 0.7
     lag_dwell_s: float = 0.3
     progress_window_s: float = 1.0
@@ -33,8 +34,12 @@ class Config:
     max_feedback_gap_s: float = 0.25
     return_timeout_s: float = 30.0
 
+    def __post_init__(self):
+        if self.pickup_alignment is None:
+            self.pickup_alignment = dict(self.alignment)
+
     def validate(self, joints):
-        for name in ("alignment", "lag", "speed", "acceleration"):
+        for name in ("alignment", "pickup_alignment", "lag", "speed", "acceleration"):
             values = getattr(self, name)
             if set(values) != set(joints) or any(not math.isfinite(v) or v <= 0 for v in values.values()):
                 raise ValueError(f"Invalid per-joint {name}")
@@ -108,6 +113,9 @@ class Controller:
         self.last = now
         errors = {j: leader[j] - follower[j] for j in self.rest} if valid else {}
         aligned = valid and all(abs(errors[j]) <= self.cfg.alignment[j] for j in self.rest)
+        pickup_aligned = valid and all(
+            abs(errors[j]) <= self.cfg.pickup_alignment[j] for j in self.rest
+        )
         rest_ok = valid and all(abs(self.rest[j] - follower[j]) <= self.cfg.alignment[j] for j in self.rest)
         if self.state in (State.FAULT, State.HALTED):
             return Decision(self.state.value, previous.value, "latched", None, errors)
@@ -162,7 +170,9 @@ class Controller:
                     if self._sustained("stalled", bool(stalled), now, self.cfg.nonprogress_s):
                         self.state, reason = State.ALIGN, "nonprogress:" + ",".join(stalled)
             elif self.state == State.ALIGN:
-                if self._sustained("aligned", aligned and boundary is None, now, self.cfg.dwell_s):
+                if self._sustained(
+                    "aligned", pickup_aligned and boundary is None, now, self.cfg.dwell_s
+                ):
                     self.state, reason = State.TRACKING, "pickup_aligned"
             elif self.state == State.RETURN:
                 if self._sustained("rest", rest_ok, now, self.cfg.dwell_s):

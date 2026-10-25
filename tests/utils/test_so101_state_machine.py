@@ -136,3 +136,19 @@ def test_pickup_first_command_is_exact_measured_position():
             assert d.command == {"j": 0}
             return
     pytest.fail("Did not resume")
+
+
+def test_pickup_exit_uses_separate_wider_alignment_tolerance():
+    c = make()
+    c.cfg.pickup_alignment["j"] = 15
+    c.state = State.ALIGN
+    for k in range(6):
+        d = c.step(k * 0.05, {"j": 14}, {"j": 0})
+    assert d.state == "tracking"
+
+    c = make()
+    c.cfg.pickup_alignment["j"] = 15
+    c.state = State.ALIGN
+    for k in range(10):
+        d = c.step(k * 0.05, {"j": 16}, {"j": 0})
+    assert d.state == "awaiting_alignment"
