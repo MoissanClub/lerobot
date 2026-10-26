@@ -113,7 +113,7 @@ def test_log_rerun_data_envtransition_scalars_and_image(mock_rerun):
 
     # We expect:
     # - observation.state.temperature -> Scalars
-    # - observation.camera -> Image (HWC) with static=True
+    # - observation.camera -> Image (HWC) on the current timeline
     # - action.throttle -> Scalars
     # - action.vector_0, action.vector_1 -> Scalars
     expected_keys = {
@@ -145,7 +145,9 @@ def test_log_rerun_data_envtransition_scalars_and_image(mock_rerun):
     img_obj = _obj_for(calls, "observation.camera")
     assert type(img_obj).__name__ == "DummyImage"
     assert img_obj.arr.shape == (10, 20, 3)  # transposed
-    assert _kwargs_for(calls, "observation.camera").get("static", False) is True  # static=True for images
+    assert (
+        _kwargs_for(calls, "observation.camera").get("static", False) is False
+    )  # camera frames must remain time-varying
 
 
 def test_log_rerun_data_plain_list_ordering_and_prefixes(mock_rerun):
@@ -193,7 +195,7 @@ def test_log_rerun_data_plain_list_ordering_and_prefixes(mock_rerun):
     img = _obj_for(calls, "observation.img")
     assert type(img).__name__ == "DummyImage"
     assert img.arr.shape == (5, 6, 3)
-    assert _kwargs_for(calls, "observation.img").get("static", False) is True
+    assert _kwargs_for(calls, "observation.img").get("static", False) is False
 
     # Vectors
     for i, val in enumerate([9, 8, 7]):
@@ -222,8 +224,17 @@ def test_log_rerun_data_kwargs_only(mock_rerun):
     img = _obj_for(calls, "observation.gray")
     assert type(img).__name__ == "DummyImage"
     assert img.arr.shape == (8, 8, 1)  # remains HWC
-    assert _kwargs_for(calls, "observation.gray").get("static", False) is True
+    assert _kwargs_for(calls, "observation.gray").get("static", False) is False
 
     a = _obj_for(calls, "action.a")
     assert type(a).__name__ == "DummyScalar"
     assert a.value == pytest.approx(1.0)
+
+
+def test_old_rerun_scalar_fallback(mock_rerun, monkeypatch):
+    vu, calls = mock_rerun
+    factory = vu.rr.Scalars
+    monkeypatch.delattr(vu.rr, "Scalars")
+    monkeypatch.setattr(vu.rr, "Scalar", factory, raising=False)
+    vu.log_rerun_data(observation={"joint": 1.0})
+    assert calls[0][1].value == 1.0
