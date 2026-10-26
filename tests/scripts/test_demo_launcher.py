@@ -91,3 +91,24 @@ def test_launcher_returns_to_last_saved_episode_after_next_record_failure(tmp_pa
     demo.launch(session)
     assert replayed == [0, 0]
     assert session.meta["current_episode"] == 0 and session.meta["committed_count"] == 1
+
+
+def test_omitted_mode_defaults_to_launch_without_hardware(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from lerobot.scripts import lerobot_so101_demo as demo
+
+    config = tmp_path / "record.json"
+    config.write_text("{}")
+    launched = []
+
+    def create(folder, record, episodes):
+        folder.mkdir(parents=True)
+        return SimpleNamespace(folder=folder, meta={})
+
+    monkeypatch.setattr(demo.DemoSession, "create", create)
+    monkeypatch.setattr(demo, "launch", lambda session: launched.append(session))
+    monkeypatch.setattr(
+        demo.sys, "argv", ["demo", "--config", str(config), "--base", str(tmp_path / "sessions")]
+    )
+    demo.main()
+    assert len(launched) == 1

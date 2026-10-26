@@ -295,7 +295,7 @@ def launch(session):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("mode", choices=["launch", "list", "check"])
+    p.add_argument("mode", nargs="?", default="launch", choices=["launch", "list", "check"])
     p.add_argument("--config", type=Path, default=WORKSPACE / "outputs/lab/so101-20261025-12v/record.json")
     p.add_argument("--base", type=Path, default=WORKSPACE / "outputs/demo/so101")
     p.add_argument(
