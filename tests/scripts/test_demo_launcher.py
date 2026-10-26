@@ -95,6 +95,7 @@ def test_launcher_returns_to_last_saved_episode_after_next_record_failure(tmp_pa
 
 def test_omitted_mode_defaults_to_launch_without_hardware(tmp_path, monkeypatch):
     from types import SimpleNamespace
+
     from lerobot.scripts import lerobot_so101_demo as demo
 
     config = tmp_path / "record.json"
