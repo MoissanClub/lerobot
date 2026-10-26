@@ -80,3 +80,7 @@ The logical dataset contains episode indices0,1,2,... (one dataset, not separate
 4. S; record a different episode; Right Arrow; R to replay it. Repeat R as desired.
 5. Continue S/Right Arrow until the required number of successful episodes is collected. Left Arrow discards a bad active attempt; S restarts it after reset.
 6. Q. Keep the printed session name for the next visit.
+
+## Startup calibration confirmation
+
+Each launch (including resume) now runs interactive follower calibration, then leader calibration, before camera preview and raw keyboard controls. Press Enter at each saved-calibration prompt to restore existing values; type c only when new range measurement is required. Support the arms during setup. Any failed calibration aborts launch. Check/list do not connect hardware. Resume uses the session's saved hardware configuration. Fresh sessions capture calibration hashes after setup. If new range measurements change calibration for an existing dataset, start a new session rather than mixing calibration mappings; the existing append hash guard remains active.

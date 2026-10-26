@@ -106,6 +106,7 @@ def test_omitted_mode_defaults_to_launch_without_hardware(tmp_path, monkeypatch)
         folder.mkdir(parents=True)
         return SimpleNamespace(folder=folder, meta={})
 
+    monkeypatch.setattr(demo, "calibrate_devices", lambda config: None)
     monkeypatch.setattr(demo.DemoSession, "create", create)
     monkeypatch.setattr(demo, "launch", lambda session: launched.append(session))
     monkeypatch.setattr(
@@ -113,3 +114,34 @@ def test_omitted_mode_defaults_to_launch_without_hardware(tmp_path, monkeypatch)
     )
     demo.main()
     assert len(launched) == 1
+
+
+def test_startup_calibration_inherits_terminal_and_stops_on_failure(monkeypatch):
+    import subprocess
+
+    import pytest
+
+    from lerobot.scripts import lerobot_so101_demo as demo
+
+    config = {
+        role: {"type": kind, "port": port, "id": role, "calibration_dir": "/cal/" + role}
+        for role, kind, port in (
+            ("robot", "so101_follower", "/dev/follower"),
+            ("teleop", "so101_leader", "/dev/leader"),
+        )
+    }
+    calls = []
+    monkeypatch.setattr(demo.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(demo.subprocess, "run", lambda command, **kw: calls.append((command, kw)))
+    demo.calibrate_devices(config)
+    assert len(calls) == 2
+    assert "--robot.port=/dev/follower" in calls[0][0]
+    assert "--teleop.calibration_dir=/cal/teleop" in calls[1][0]
+    assert all(kw == {"check": True} for _, kw in calls)
+
+    def fail(command, **kwargs):
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(demo.subprocess, "run", fail)
+    with pytest.raises(subprocess.CalledProcessError):
+        demo.calibrate_devices(config)

@@ -293,6 +293,24 @@ def launch(session):
         session.close()
 
 
+def calibrate_devices(config):
+    """Run interactive calibration with the Terminal before raw-key handling starts."""
+    if not sys.stdin.isatty():
+        raise RuntimeError("Launch from an interactive Terminal for calibration confirmation")
+    for role, label in (("robot", "follower"), ("teleop", "leader")):
+        device = config[role]
+        print(
+            f"Startup {label} calibration: Enter uses the saved calibration; "
+            "type c only to measure new ranges. Support the arms during setup.",
+            flush=True,
+        )
+        command = [sys.executable, "-m", "lerobot.scripts.lerobot_calibrate"]
+        for field in ("type", "port", "id", "calibration_dir"):
+            command.append(f"--{role}.{field}={device[field]}")
+        # Inherit stdin/stdout: these prompts cannot use the recorder's DEVNULL stdin.
+        subprocess.run(command, check=True)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("mode", nargs="?", default="launch", choices=["launch", "list", "check"])
@@ -338,13 +356,18 @@ def main():
         folder = Path(args.session)
         folder = folder if folder.is_absolute() else base / folder
         session = DemoSession(folder)
+        try:
+            calibrate_devices(json.loads((session.folder / "base_record.json").read_text()))
+        except BaseException:
+            session.close()
+            raise
     else:
         if args.episodes < 1:
             p.error("episodes must be positive")
         label = "".join(c for c in args.label if c.isalnum() or c in "_-") or "demo"
-        session = DemoSession.create(
-            base / (token() + "_" + label), json.loads(args.config.read_text()), args.episodes
-        )
+        config = json.loads(args.config.read_text())
+        calibrate_devices(config)
+        session = DemoSession.create(base / (token() + "_" + label), config, args.episodes)
         session.meta["source_config"] = str(args.config.resolve())
         atomic_json(session.folder / "session.json", session.meta)
     print("Open session:", session.folder, flush=True)
