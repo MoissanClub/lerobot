@@ -139,12 +139,12 @@ from lerobot.utils.catch_up_monitor import (
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.utils.control_utils import (
     init_keyboard_listener,
-    is_headless,
     predict_action,
     sanity_check_dataset_name,
     sanity_check_dataset_robot_compatibility,
 )
 from lerobot.utils.import_utils import register_third_party_plugins
+from lerobot.utils.manual_recording import FileKeyboard, ManualKeyboard, manual_episodes
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.utils import (
     get_safe_torch_device,
@@ -232,6 +232,8 @@ class RecordConfig:
     catch_up_warning: JointTrackingWarningConfig = field(default_factory=JointTrackingWarningConfig)
     # Resume recording on an existing dataset.
     resume: bool = False
+    manual_control: bool = False
+    manual_control_file: str | None = None
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -306,6 +308,7 @@ def record_loop(
     display_data: bool = False,
     display_compressed_images: bool = False,
     catch_up_monitor: ControlLoopMonitor | None = None,
+    event_poll=None,
 ):
     if dataset is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
@@ -347,6 +350,8 @@ def record_loop(
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
 
+        if event_poll is not None:
+            event_poll()
         if events["exit_early"]:
             events["exit_early"] = False
             break
@@ -443,6 +448,13 @@ def record_loop(
 def record(cfg: RecordConfig) -> LeRobotDataset:
     init_logging()
     logging.info(pformat(asdict(cfg)))
+    if cfg.manual_control:
+        import sys
+
+        if not sys.stdin.isatty() and not cfg.manual_control_file:
+            raise ValueError("Manual recording requires an interactive Terminal")
+        if cfg.policy is not None or cfg.teleop is None:
+            raise ValueError("Manual recording requires teleoperation without a policy")
     if cfg.display_data:
         init_rerun(session_name="recording", ip=cfg.display_ip, port=cfg.display_port)
     display_compressed_images = (
@@ -534,7 +546,15 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         catch_up_monitor = make_so_arm_tracking_monitor(
             robot, teleop, cfg.catch_up_warning, play_sounds=cfg.play_sounds
         )
-        listener, events = init_keyboard_listener()
+        if cfg.manual_control:
+            events = {"exit_early": False, "rerecord_episode": False, "stop_recording": False}
+            listener = (
+                FileKeyboard(events, cfg.manual_control_file)
+                if cfg.manual_control_file
+                else ManualKeyboard(events)
+            ).start()
+        else:
+            listener, events = init_keyboard_listener()
 
         if not cfg.dataset.streaming_encoding:
             logging.info(
@@ -542,39 +562,9 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
             )
 
         with VideoEncodingManager(dataset):
-            recorded_episodes = 0
-            while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-                log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-                record_loop(
-                    robot=robot,
-                    events=events,
-                    fps=cfg.dataset.fps,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    teleop=teleop,
-                    policy=policy,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                    dataset=dataset,
-                    control_time_s=cfg.dataset.episode_time_s,
-                    single_task=cfg.dataset.single_task,
-                    display_data=cfg.display_data,
-                    display_compressed_images=display_compressed_images,
-                    catch_up_monitor=catch_up_monitor,
-                )
+            if cfg.manual_control:
 
-                # Execute a few seconds without recording to give time to manually reset the environment
-                # Skip reset for the last episode to be recorded
-                if not events["stop_recording"] and (
-                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-                ):
-                    log_say("Reset the environment", cfg.play_sounds)
-
-                    # reset g1 robot
-                    if robot.name == "unitree_g1":
-                        robot.reset()
-
+                def run_manual_phase(active_dataset, poll):
                     record_loop(
                         robot=robot,
                         events=events,
@@ -583,22 +573,88 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
                         robot_action_processor=robot_action_processor,
                         robot_observation_processor=robot_observation_processor,
                         teleop=teleop,
-                        control_time_s=cfg.dataset.reset_time_s,
+                        policy=policy,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                        dataset=active_dataset,
+                        control_time_s=cfg.dataset.episode_time_s
+                        if active_dataset is not None
+                        else float("inf"),
                         single_task=cfg.dataset.single_task,
                         display_data=cfg.display_data,
+                        display_compressed_images=display_compressed_images,
+                        catch_up_monitor=catch_up_monitor,
+                        event_poll=poll,
+                    )
+
+                manual_episodes(
+                    dataset,
+                    events,
+                    listener,
+                    run_manual_phase,
+                    cfg.dataset.num_episodes,
+                    lambda text: log_say(text, cfg.play_sounds),
+                )
+            else:
+                recorded_episodes = 0
+                while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                    log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
+                    record_loop(
+                        robot=robot,
+                        events=events,
+                        fps=cfg.dataset.fps,
+                        teleop_action_processor=teleop_action_processor,
+                        robot_action_processor=robot_action_processor,
+                        robot_observation_processor=robot_observation_processor,
+                        teleop=teleop,
+                        policy=policy,
+                        preprocessor=preprocessor,
+                        postprocessor=postprocessor,
+                        dataset=dataset,
+                        control_time_s=cfg.dataset.episode_time_s,
+                        single_task=cfg.dataset.single_task,
+                        display_data=cfg.display_data,
+                        display_compressed_images=display_compressed_images,
                         catch_up_monitor=catch_up_monitor,
                     )
 
-                if events["rerecord_episode"]:
-                    log_say("Re-record episode", cfg.play_sounds)
-                    events["rerecord_episode"] = False
-                    events["exit_early"] = False
-                    dataset.clear_episode_buffer()
-                    continue
+                    # Execute a few seconds without recording to give time to manually reset the environment
+                    # Skip reset for the last episode to be recorded
+                    if not events["stop_recording"] and (
+                        (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                    ):
+                        log_say("Reset the environment", cfg.play_sounds)
 
-                dataset.save_episode()
-                recorded_episodes += 1
+                        # reset g1 robot
+                        if robot.name == "unitree_g1":
+                            robot.reset()
+
+                        record_loop(
+                            robot=robot,
+                            events=events,
+                            fps=cfg.dataset.fps,
+                            teleop_action_processor=teleop_action_processor,
+                            robot_action_processor=robot_action_processor,
+                            robot_observation_processor=robot_observation_processor,
+                            teleop=teleop,
+                            control_time_s=cfg.dataset.reset_time_s,
+                            single_task=cfg.dataset.single_task,
+                            display_data=cfg.display_data,
+                            catch_up_monitor=catch_up_monitor,
+                        )
+
+                    if events["rerecord_episode"]:
+                        log_say("Re-record episode", cfg.play_sounds)
+                        events["rerecord_episode"] = False
+                        events["exit_early"] = False
+                        dataset.clear_episode_buffer()
+                        continue
+
+                    dataset.save_episode()
+                    recorded_episodes += 1
     finally:
+        if cfg.manual_control and listener is not None:
+            listener.stop()
         log_say("Stop recording", cfg.play_sounds, blocking=True)
 
         if dataset:
@@ -612,7 +668,7 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
         if catch_up_monitor is not None:
             catch_up_monitor.close()
 
-        if not is_headless() and listener:
+        if listener is not None:
             listener.stop()
 
         if cfg.dataset.push_to_hub:

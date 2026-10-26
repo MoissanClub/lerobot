@@ -275,3 +275,7 @@ This plan does not include policy training, autonomous robot movement, changes
 to motor IDs/calibration, or automatic dataset uploads. Upgrading LeRobot or
 PyTorch is a separate compatibility project. No implementation or hardware
 session is started by creating this plan.
+
+Demo launcher checkpoint — 2026-10-25
+------------------------------------
+F1 now has a supervised-demo prototype: one session/dataset, explicit launcher Start, Right Arrow finish/save, Left Arrow discard back to Ready, replay last committed episode and quit. Terminal-local controls avoid macOS global keyboard permission. Idle waiting unlimited; episode maximum300s. Immutable staged datasets protect last committed episode on failed attempts; APFS clone or independent copy. Record/replay processes disconnect arms between activities; this does not implement continuous motor holding or SO101 pickup-state recording gates. See DEMO_RUNBOOK.md. Software validation passed; physical launcher rehearsal pending.

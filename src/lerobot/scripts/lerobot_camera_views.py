@@ -4,6 +4,7 @@ import argparse
 import json
 import select
 import shutil
+import signal
 import sys
 import time
 from datetime import datetime
@@ -76,14 +77,23 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--indices", type=int, nargs=2, default=[0, 1])
     p.add_argument("--config-dir", type=Path, required=True)
+    p.add_argument("--preview-only", action="store_true")
+    p.add_argument("--no-controls", action="store_true", help="Background preview owned by demo launcher")
+    p.add_argument("--rotations", type=int, nargs=2, choices=[0, 90, 180, -90], default=[0, 0])
     args = p.parse_args()
     if len(set(args.indices)) != 2:
         p.error("Choose two distinct indices")
     for filename in ("record.json", "replay.json"):
-        if not (args.config_dir / filename).is_file():
+        if not args.preview_only and not (args.config_dir / filename).is_file():
             p.error(f"Missing {filename}")
-    if not sys.stdin.isatty():
+    if not args.no_controls and not sys.stdin.isatty():
         p.error("Use an interactive Terminal for view confirmation")
+    if args.no_controls:
+
+        def terminate(signum, frame):
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, terminate)
     captures = []
     views = []
     try:
@@ -105,7 +115,14 @@ def main():
                 raise RuntimeError(
                     f"Camera {index} reports {fps} FPS, not required 30; select a supported mode before recording"
                 )
-            views.append({"index": index, "rotation": 0, "width": frame.shape[1], "height": frame.shape[0]})
+            views.append(
+                {
+                    "index": index,
+                    "rotation": args.rotations[len(views)],
+                    "width": frame.shape[1],
+                    "height": frame.shape[0],
+                }
+            )
             print(f"Camera {index}: {frame.shape[1]}x{frame.shape[0]}, reported FPS={fps}", flush=True)
         prepare_rerun_path()
         rr.init("SO101_camera_view_setup", spawn=True)
@@ -135,7 +152,7 @@ def main():
                 cv2.putText(image, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                 rr.log(f"camera_{slot}", rr.Image(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)).compress())
             frames += 1
-            if select.select([sys.stdin], [], [], 0)[0]:
+            if not args.no_controls and select.select([sys.stdin], [], [], 0)[0]:
                 command = sys.stdin.readline().strip().lower()
                 if command == "swap":
                     views.reverse()
@@ -144,6 +161,8 @@ def main():
                     rotations = [0, 90, 180, -90]
                     view = views[slot]
                     view["rotation"] = rotations[(rotations.index(view["rotation"]) + 1) % 4]
+                elif command == "save" and args.preview_only:
+                    print("Preview-only: use quit to exit; configuration is unchanged.")
                 elif command == "save":
                     print(json.dumps(save_views(args.config_dir, views), indent=2))
                     print("Saved mapping/orientation to record.json and replay.json. No arm was connected.")
