@@ -49,6 +49,7 @@ import cv2
 import numpy as np
 import rerun as rr
 
+from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.configs import parser
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.processor import (
@@ -136,6 +137,8 @@ def prepare_recorded_previews(dataset, episode, width, max_bytes):
                 )
             frame[key.removeprefix("observation.images.")] = payload
         previews.append(frame)
+        if len(previews) == 1 or len(previews) % 100 == 0:
+            logging.info("Preparing reference previews before robot connection: %s frames", len(previews))
     return previews
 
 
