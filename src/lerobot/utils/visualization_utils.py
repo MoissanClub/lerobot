@@ -21,6 +21,7 @@ import rerun as rr
 from lerobot.processor import RobotAction, RobotObservation
 
 from .constants import ACTION, ACTION_PREFIX, OBS_PREFIX, OBS_STR
+from .rerun_viewer import prepare_rerun_path
 
 
 def init_rerun(
@@ -41,6 +42,7 @@ def init_rerun(
     if ip and port:
         rr.connect_grpc(url=f"rerun+http://{ip}:{port}/proxy")
     else:
+        prepare_rerun_path()
         rr.spawn(memory_limit=memory_limit)
 
 

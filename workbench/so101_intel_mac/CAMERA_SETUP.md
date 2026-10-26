@@ -30,3 +30,5 @@ After camera-only confirmation, the existing commands work:
 Replay options `display_data` and `display_recorded_cameras` default false outside the saved camera config; recorded references require display_data. Set display_recorded_cameras=false for live views only. Leader is unused for replay. The user should return follower close to the first recorded target before replay. These commands actuate hardware; the view setup command does not.
 
 Intel compatibility: scalar logging uses the installed Rerun0.22 Scalar fallback; camera frames are time-varying rather than static. Synthetic dual-video recording/encoding/reload and four-view image/scalar logging have passed locally. Actual camera views/permissions and physical replay remain operator validation tasks.
+
+Viewer discovery: setup/record/replay prepend the active Python environment’s bin directory before spawning Rerun. Direct `.venv/bin/python` or CLI use no longer requires shell activation for the viewer to be found. Installed viewer version0.22.1 verified locally; actual GUI remains an operator-side check.

@@ -13,6 +13,8 @@ import cv2
 import rerun as rr
 import rerun.blueprint as rrb
 
+from lerobot.utils.rerun_viewer import prepare_rerun_path
+
 
 def rotate_image(image, degrees):
     codes = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, -90: cv2.ROTATE_90_COUNTERCLOCKWISE}
@@ -105,6 +107,7 @@ def main():
                 )
             views.append({"index": index, "rotation": 0, "width": frame.shape[1], "height": frame.shape[0]})
             print(f"Camera {index}: {frame.shape[1]}x{frame.shape[0]}, reported FPS={fps}", flush=True)
+        prepare_rerun_path()
         rr.init("SO101_camera_view_setup", spawn=True)
         rr.send_blueprint(
             rrb.Blueprint(
