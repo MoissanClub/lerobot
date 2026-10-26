@@ -306,7 +306,10 @@ class FeetechMotorsBus(SerialMotorsBus):
     def enable_torque(self, motors: int | str | list[str] | None = None, num_retry: int = 0) -> None:
         for motor in self._get_motors_list(motors):
             self.write("Torque_Enable", motor, TorqueMode.ENABLED.value, num_retry=num_retry)
-            self.write("Lock", motor, 1, num_retry=num_retry)
+            # Lock=1 is idempotent. A transient malformed reply immediately after
+            # enabling torque should get a bounded retry before startup aborts.
+            # This does not retry motor-reported faults or control-loop targets.
+            self.write("Lock", motor, 1, num_retry=max(2, num_retry))
 
     def _encode_sign(self, data_name: str, ids_values: dict[int, int]) -> dict[int, int]:
         for id_ in ids_values:
