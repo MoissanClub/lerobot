@@ -22,6 +22,15 @@ def rotate_image(image, degrees):
     return cv2.rotate(image, codes[degrees]) if degrees else image
 
 
+def validate_camera_selection(indices, rotations):
+    if not indices:
+        raise ValueError("Choose at least one camera index")
+    if len(set(indices)) != len(indices):
+        raise ValueError("Choose distinct camera indices")
+    if len(rotations) != len(indices):
+        raise ValueError("Provide one rotation per camera index")
+
+
 def save_views(directory, views):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     paths = [directory / "record.json", directory / "replay.json"]
@@ -75,14 +84,18 @@ def save_views(directory, views):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--indices", type=int, nargs=2, default=[0, 1])
+    p.add_argument("--indices", type=int, nargs="+", default=[0, 1])
     p.add_argument("--config-dir", type=Path, required=True)
     p.add_argument("--preview-only", action="store_true")
     p.add_argument("--no-controls", action="store_true", help="Background preview owned by demo launcher")
-    p.add_argument("--rotations", type=int, nargs=2, choices=[0, 90, 180, -90], default=[0, 0])
+    p.add_argument("--rotations", type=int, nargs="+", choices=[0, 90, 180, -90])
     args = p.parse_args()
-    if len(set(args.indices)) != 2:
-        p.error("Choose two distinct indices")
+    if args.rotations is None:
+        args.rotations = [0] * len(args.indices)
+    try:
+        validate_camera_selection(args.indices, args.rotations)
+    except ValueError as exc:
+        p.error(str(exc))
     for filename in ("record.json", "replay.json"):
         if not args.preview_only and not (args.config_dir / filename).is_file():
             p.error(f"Missing {filename}")
@@ -129,12 +142,18 @@ def main():
         rr.send_blueprint(
             rrb.Blueprint(
                 rrb.Horizontal(
-                    *[rrb.Spatial2DView(name=f"camera_{i}", origin=f"camera_{i}") for i in range(2)]
+                    *[rrb.Spatial2DView(name=f"camera_{i}", origin=f"camera_{i}") for i in range(len(views))]
                 )
             )
         )
+        rotate_commands = " | ".join(f"rotate {i}" for i in range(len(views)))
+        commands = (
+            "swap | " + rotate_commands + " | save | quit"
+            if len(views) > 1
+            else rotate_commands + " | save | quit"
+        )
         print(
-            "Cover one lens to identify its view. Commands + Enter: swap | rotate 0 | rotate 1 | save | quit",
+            f"Confirm each view. Commands + Enter: {commands}",
             flush=True,
         )
         frames = 0
@@ -156,8 +175,11 @@ def main():
                 command = sys.stdin.readline().strip().lower()
                 if command == "swap":
                     views.reverse()
-                elif command in ("rotate 0", "rotate 1"):
-                    slot = int(command[-1])
+                elif command.startswith("rotate ") and command.removeprefix("rotate ").isdigit():
+                    slot = int(command.removeprefix("rotate "))
+                    if slot >= len(views):
+                        print(f"No camera_{slot}; valid slots are 0 through {len(views) - 1}")
+                        continue
                     rotations = [0, 90, 180, -90]
                     view = views[slot]
                     view["rotation"] = rotations[(rotations.index(view["rotation"]) + 1) % 4]
@@ -170,7 +192,7 @@ def main():
                 elif command == "quit":
                     break
                 else:
-                    print("Commands: swap | rotate 0 | rotate 1 | save | quit")
+                    print(f"Commands: {commands}")
             time.sleep(0.01)
     finally:
         for capture in captures:

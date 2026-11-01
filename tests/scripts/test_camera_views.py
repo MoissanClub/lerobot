@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import pytest
 
-from lerobot.scripts.lerobot_camera_views import rotate_image, save_views
+from lerobot.scripts.lerobot_camera_views import rotate_image, save_views, validate_camera_selection
 from lerobot.scripts.lerobot_replay import prepare_recorded_previews, show_replay_frame
 
 
@@ -34,6 +34,23 @@ def test_view_save_preserves_calibration_and_replay_dataset_match(tmp_path):
     assert rp["display_recorded_cameras"] and rp["display_data"]
     assert len(list(tmp_path.glob("*.before-cameras-*.json"))) == 2
     assert rotate_image(np.zeros((2, 3, 3), np.uint8), 90).shape == (3, 2, 3)
+
+
+def test_one_camera_selection_and_save(tmp_path):
+    validate_camera_selection([2], [0])
+    record = {
+        "robot": {"calibration_dir": "keep_this", "cameras": {}},
+        "dataset": {"repo_id": "local/old", "root": str(tmp_path / "datasets/old")},
+    }
+    replay = {
+        "robot": {"calibration_dir": "keep_this", "cameras": {}},
+        "dataset": {"repo_id": "local/old", "root": str(tmp_path / "datasets/old"), "episode": 0},
+    }
+    for name, cfg in [("record", record), ("replay", replay)]:
+        (tmp_path / (name + ".json")).write_text(json.dumps(cfg))
+    cameras = save_views(tmp_path, [{"index": 2, "rotation": 0, "width": 640, "height": 480}])
+    assert list(cameras) == ["camera_0"]
+    assert cameras["camera_0"]["index_or_path"] == 2
 
 
 class Dataset:

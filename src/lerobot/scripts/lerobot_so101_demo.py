@@ -346,7 +346,8 @@ def main():
         from lerobot.scripts.lerobot_record import RecordConfig
 
         cfg = draccus.parse(RecordConfig, config_path=str(args.config.resolve()), args=[])
-        assert len(cfg.robot.cameras) == 2
+        if not cfg.robot.cameras:
+            raise ValueError("Configure at least one camera")
         for d in (cfg.robot, cfg.teleop):
             if not (d.calibration_dir / (d.id + ".json")).is_file():
                 raise ValueError("Missing calibration")
