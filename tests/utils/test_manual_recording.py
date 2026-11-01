@@ -41,6 +41,7 @@ def test_two_explicit_starts_and_finishes_no_wait_frames_recorded():
     k = Keyboard(e)
     d = Dataset()
     phases = []
+    spoken = []
 
     def run(dataset, poll):
         phases.append(k.phase)
@@ -50,9 +51,11 @@ def test_two_explicit_starts_and_finishes_no_wait_frames_recorded():
             dataset.episode_buffer["size"] = 20
             apply_key(e, k.phase, "f")
 
-    assert manual_episodes(d, e, k, run, 2, lambda _: None) == 2
+    assert manual_episodes(d, e, k, run, 2, spoken.append) == 2
     assert phases == ["waiting", "recording", "waiting", "recording"]
     assert d.saved == [20, 20]
+    assert spoken.count("You can start pick up") == 2
+    assert all(not message.startswith("Recording episode") for message in spoken)
 
 
 def test_discard_does_not_increment_then_save_and_quit():

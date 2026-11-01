@@ -67,7 +67,7 @@ def manual_episodes(dataset, events, keyboard, run_phase, max_episodes, say):
         if events["stop_recording"]:
             break
         keyboard.set_phase("recording")
-        say(f"Recording episode {dataset.num_episodes}")
+        say("You can start pick up")
         run_phase(dataset, keyboard.poll)
         if events["rerecord_episode"]:
             if dataset.episode_buffer is not None:
