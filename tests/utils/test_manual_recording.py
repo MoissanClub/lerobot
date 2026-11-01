@@ -55,6 +55,7 @@ def test_two_explicit_starts_and_finishes_no_wait_frames_recorded():
     assert phases == ["waiting", "recording", "waiting", "recording"]
     assert d.saved == [20, 20]
     assert spoken.count("You can start pick up") == 2
+    assert spoken.count("Please slowly return the robot back to original position.") == 2
     assert all(not message.startswith("Recording episode") for message in spoken)
 
 
@@ -63,6 +64,7 @@ def test_discard_does_not_increment_then_save_and_quit():
     k = Keyboard(e)
     d = Dataset()
     actions = iter(["d", "q"])
+    spoken = []
 
     def run(dataset, poll):
         if dataset is None:
@@ -71,8 +73,9 @@ def test_discard_does_not_increment_then_save_and_quit():
             dataset.episode_buffer["size"] = 12
             apply_key(e, k.phase, next(actions))
 
-    assert manual_episodes(d, e, k, run, 25, lambda _: None) == 1
+    assert manual_episodes(d, e, k, run, 25, spoken.append) == 1
     assert d.discarded == 1 and d.saved == [12]
+    assert "Please slowly return the robot back to original position." not in spoken
 
 
 def test_quit_waiting_never_creates_empty_episode():
@@ -92,6 +95,7 @@ def test_five_minute_timeout_can_save_without_finish_key():
     e = events()
     d = Dataset()
     k = Keyboard(e)
+    spoken = []
 
     def run(dataset, poll):
         if dataset is None:
@@ -99,8 +103,10 @@ def test_five_minute_timeout_can_save_without_finish_key():
         else:
             dataset.episode_buffer["size"] = 9000  # Timed control loop returned normally.
 
-    assert manual_episodes(d, e, k, run, 1, lambda _: None) == 1
+    assert manual_episodes(d, e, k, run, 1, spoken.append) == 1
     assert d.saved == [9000]
+    assert "Saving" in spoken
+    assert "Please slowly return the robot back to original position." not in spoken
 
 
 def test_file_control_consumes_once_and_discard_exits_attempt(tmp_path):

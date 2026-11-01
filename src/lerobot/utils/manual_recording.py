@@ -18,6 +18,8 @@ def apply_key(events, phase, key):
         events["exit_early"] = True
         if key == "d":
             events["rerecord_episode"] = True
+        else:
+            events["finish_requested"] = True
 
 
 class ManualKeyboard:
@@ -37,6 +39,7 @@ class ManualKeyboard:
         self.phase = phase
         self.events["exit_early"] = False
         self.events["rerecord_episode"] = False
+        self.events["finish_requested"] = False
         # Keys typed during saving must not silently start the next recording.
         if self.original is not None:
             termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
@@ -77,8 +80,12 @@ def manual_episodes(dataset, events, keyboard, run_phase, max_episodes, say):
         if dataset.episode_buffer is None or dataset.episode_buffer["size"] == 0:
             say("No frames recorded")
             return saved
+        finish_requested = events.get("finish_requested", False)
         keyboard.set_phase("saving")
-        say("Saving")
+        if finish_requested:
+            say("Please slowly return the robot back to original position.")
+        else:
+            say("Saving")
         dataset.save_episode()
         saved += 1
         logging.info("SAVED episode %s (%s/%s this launch)", dataset.num_episodes - 1, saved, max_episodes)
@@ -104,6 +111,7 @@ class FileKeyboard:
         self.phase = phase
         self.events["exit_early"] = False
         self.events["rerecord_episode"] = False
+        self.events["finish_requested"] = False
         logging.info("MANUAL %s (launcher controls)", phase.upper())
 
     def poll(self):
