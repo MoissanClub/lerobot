@@ -87,6 +87,29 @@ def test_gravity_matches_potential_energy_gradient(model):
     assert np.linalg.norm(model.gravity(q)) > 0.1
 
 
+def test_live_gravity_matches_fixed_model_at_neutral_waist_and_pelvis(model):
+    if model.config.embodiment != "g1_29":
+        pytest.skip("Live-waist gravity is a G1-29 hardware path")
+    q = posture(model)
+    np.testing.assert_allclose(
+        model.gravity_live(q, np.zeros(3), [1.0, 0.0, 0.0, 0.0]),
+        model.gravity(q),
+        atol=1e-12,
+    )
+
+
+def test_live_gravity_responds_to_waist_and_pelvis_orientation(model):
+    if model.config.embodiment != "g1_29":
+        pytest.skip("Live-waist gravity is a G1-29 hardware path")
+    q = posture(model)
+    neutral = model.gravity_live(q, np.zeros(3), [1.0, 0.0, 0.0, 0.0])
+    waist = model.gravity_live(q, [0.1, -0.08, 0.12], [1.0, 0.0, 0.0, 0.0])
+    angle = 0.15
+    tilted = model.gravity_live(q, np.zeros(3), [np.cos(angle / 2), 0.0, np.sin(angle / 2), 0.0])
+    assert np.max(np.abs(waist - neutral)) > 1e-3
+    assert np.max(np.abs(tilted - neutral)) > 1e-3
+
+
 def test_nonidentity_motor_to_model_order(model):
     permuted = copy.copy(model)
     permuted._q_indices = model._q_indices[::-1].copy()

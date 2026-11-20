@@ -144,6 +144,37 @@ class G1ArmKinematics:
         )
         self._last_q = np.clip(np.zeros(self.size), self.lower, self.upper)
         self._opti = None
+        self.gravity_model = None
+        if config.embodiment == "g1_29":
+            self.gravity_joint_names = (
+                "waist_yaw_joint",
+                "waist_roll_joint",
+                "waist_pitch_joint",
+                *self.joint_names,
+            )
+            gravity_locked = [
+                i
+                for i, name in enumerate(self.full_model.names)
+                if i and name not in self.gravity_joint_names
+            ]
+            self.gravity_model = pin.buildReducedModel(
+                self.full_model,
+                gravity_locked,
+                pin.neutral(self.full_model),
+            )
+            self._gravity_q_indices = np.array(
+                [
+                    self.gravity_model.joints[self.gravity_model.getJointId(name)].idx_q
+                    for name in self.gravity_joint_names
+                ]
+            )
+            self._gravity_arm_v_indices = np.array(
+                [
+                    self.gravity_model.joints[self.gravity_model.getJointId(name)].idx_v
+                    for name in self.joint_names
+                ]
+            )
+            self._gravity_data = self.gravity_model.createData()
 
     def _to_model(self, q) -> np.ndarray:
         q = _vector(q, self.size, "Arm positions in DDS order")
@@ -161,6 +192,35 @@ class G1ArmKinematics:
         data = self.model.createData()
         tau = self._pin.computeGeneralizedGravity(self.model, data, self._to_model(q))
         return tau[self._v_indices].copy()
+
+    def gravity_live(self, q, waist_q, base_quaternion) -> np.ndarray:
+        """Arm gravity torque using live waist joints and pelvis orientation.
+
+        ``base_quaternion`` follows Unitree LowState ordering ``[w, x, y, z]``.
+        The model remains arm/waist only: leg configuration cannot affect arm
+        gravity in the URDF tree, while locked hand joints retain their inertias.
+        """
+        if self.gravity_model is None:
+            raise ValueError("Live-waist gravity is only available for g1_29")
+        arm = _vector(q, self.size, "Arm positions in DDS order")
+        waist = _vector(waist_q, 3, "Waist positions in DDS order")
+        quaternion = _vector(base_quaternion, 4, "Pelvis quaternion [w, x, y, z]")
+        norm = np.linalg.norm(quaternion)
+        if norm < 1e-8:
+            raise ValueError("Pelvis quaternion norm is too small")
+        w, x, y, z = quaternion / norm
+        rotation_world_from_base = np.array(
+            [
+                [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+            ]
+        )
+        model_q = self._pin.neutral(self.gravity_model)
+        model_q[self._gravity_q_indices] = np.r_[waist, arm]
+        self.gravity_model.gravity.linear = rotation_world_from_base.T @ np.array([0.0, 0.0, -9.81])
+        tau = self._pin.computeGeneralizedGravity(self.gravity_model, self._gravity_data, model_q)
+        return tau[self._gravity_arm_v_indices].copy()
 
     def arm_action(self, q) -> dict[str, float]:
         """Arm-only action; never implicitly zero legs or waist."""

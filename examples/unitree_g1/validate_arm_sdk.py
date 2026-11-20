@@ -55,8 +55,8 @@ def contract_template(urdf):
         network_interface="REPLACE_WITH_ROBOT_INTERFACE",
         read_only=False,
         expected_mode_machine=None,
-        kp=[60.0] * 14,
-        kd=[1.5] * 14,
+        kp=[80.0, 80.0, 80.0, 80.0, 40.0, 40.0, 40.0] * 2,
+        kd=[3.0, 3.0, 3.0, 3.0, 1.5, 1.5, 1.5] * 2,
         lower=limits["lower"],
         upper=limits["upper"],
         torque_limits=[min(15.0, effort) for effort in limits["effort"]],
@@ -78,9 +78,10 @@ def contract_template(urdf):
         "stock_lower_body_owner_confirmed": False,
         "uncommanded_waist_semantics_verified": False,
         "packet_loss_and_process_death_response_verified": False,
+        "packet_loss_and_process_death_limitations_accepted": False,
         "initial_hold_uncommanded_waist_test_approved": False,
         "initial_hold_failure_response_limitations_accepted": False,
-        "release_weight_zero_behavior_reviewed": False,
+        "normal_return_and_release_reviewed": False,
         "gains_limits_and_gravity_reviewed": False,
         "urdf_sha256": digest(urdf),
         "arm_sdk": asdict(cfg),
@@ -110,7 +111,7 @@ def validate_contract(doc, urdf, hardware_motion, phase=None):
             "robot_side_execution_confirmed",
             "exclusive_arm_publisher_confirmed",
             "stock_lower_body_owner_confirmed",
-            "release_weight_zero_behavior_reviewed",
+            "normal_return_and_release_reviewed",
             "gains_limits_and_gravity_reviewed",
         ):
             if doc.get(key) is not True:
@@ -123,12 +124,15 @@ def validate_contract(doc, urdf, hardware_motion, phase=None):
                 if doc.get(key) is not True:
                     raise ValueError(f"Initial hold gate not approved: {key}")
         else:
-            for key in (
-                "uncommanded_waist_semantics_verified",
-                "packet_loss_and_process_death_response_verified",
+            if doc.get("uncommanded_waist_semantics_verified") is not True:
+                raise ValueError("Hardware motion gate not approved: uncommanded_waist_semantics_verified")
+            if not (
+                doc.get("packet_loss_and_process_death_response_verified") is True
+                or doc.get("packet_loss_and_process_death_limitations_accepted") is True
             ):
-                if doc.get(key) is not True:
-                    raise ValueError(f"Hardware motion gate not approved: {key}")
+                raise ValueError(
+                    "Hardware motion requires verified failure response or explicit acceptance of its limitations"
+                )
         for key in (
             "reviewer",
             "robot_serial",
@@ -211,6 +215,7 @@ class SimulationTransport:
                 msg = unitree_hg_msg_dds__LowState_()
                 tick += 1
                 msg.tick, msg.mode_machine, msg.mode_pr = tick, self.cfg.expected_mode_machine or 0, 0
+                msg.imu_state.quaternion = [1.0, 0.0, 0.0, 0.0]
                 for i, s in enumerate(ARM_SLOTS):
                     msg.motor_state[s].q = float(sim.data.qpos[sim.qadr[i]])
                     msg.motor_state[s].dq = float(sim.data.qvel[sim.vadr[i]])
@@ -334,8 +339,7 @@ def main(argv=None):
                     robot.activate()
                     report["motion_enabled"] = True
                 started = time.monotonic()
-                ramp = 0 if cfg.read_only else cfg.blend_s + 0.5
-                total = ramp + args.duration_s + (0 if cfg.read_only else 1.0)
+                total = args.duration_s
                 print(f"Running {args.backend}/{args.phase}; duration about {total:.1f}s", flush=True)
                 while time.monotonic() - started < total:
                     stamp = time.monotonic()
@@ -346,7 +350,7 @@ def main(argv=None):
                             start,
                             ARM_KEYS.index(args.joint),
                             args.delta_rad,
-                            (elapsed - ramp) / args.duration_s,
+                            elapsed / args.duration_s,
                         )
                     if not cfg.read_only:
                         robot.send(dict(zip(ARM_KEYS, target.tolist(), strict=True)))
@@ -380,21 +384,28 @@ def main(argv=None):
                     report["directed_measured_motion_rad"] = float(peak)
                     if peak < abs(args.delta_rad) * 0.5:
                         raise RuntimeError("Insufficient measured motion in requested direction")
-                    end_error = float(np.max(np.abs(np.array(report["samples"][-1]["measured"]) - start)))
                     other_motion = max(
                         float(np.max(np.abs(np.delete(np.array(s["measured"]) - start, index))))
                         for s in report["samples"]
                     )
                     tolerance = min(cfg.max_tracking_error, max(0.005, abs(args.delta_rad) * 0.25))
                     report.update(
-                        final_return_error_rad=end_error,
                         max_other_arm_joint_motion_rad=other_motion,
                         diagnostic_return_tolerance_rad=tolerance,
                     )
-                    if max(end_error, other_motion) > tolerance:
+                    if other_motion > tolerance:
                         raise RuntimeError(
-                            "Return error or unselected-arm-joint movement exceeded diagnostic tolerance"
+                            "Unselected-arm-joint movement exceeded diagnostic tolerance"
                         )
+                if not cfg.read_only:
+                    robot.release_to_initial()
+                    report["normal_release_complete"] = robot.release_complete
+                    report["release_context"] = robot.release_context
+                if args.phase == "joint" and abs(args.delta_rad) > 0:
+                    end_error = float(robot.release_context["final_return_error_rad"])
+                    report["final_return_error_rad"] = end_error
+                    if end_error > report["diagnostic_return_tolerance_rad"]:
+                        raise RuntimeError("Return error exceeded diagnostic tolerance")
                 report["status"] = "software_checks_passed"
         except KeyboardInterrupt:
             report["status"] = "cancelled"

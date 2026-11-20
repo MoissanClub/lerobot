@@ -34,8 +34,13 @@ class G1ArmSDKConfig:
     state_timeout_s: float = 5.0
     max_state_age_s: float = 0.1
     command_timeout_s: float = 0.1
-    period_s: float = 0.02
-    blend_s: float = 2.0
+    period_s: float = 1.0 / 250.0
+    release_blend_s: float = 2.0
+    release_timeout_s: float = 15.0
+    release_tolerance: float = 0.05
+    release_velocity: float = 0.1
+    guard_confirm_samples: int = 3
+    guard_hard_multiplier: float = 2.0
     max_velocity: float = 0.1
     max_acceleration: float = 0.5
     max_displacement: float = 0.05
@@ -66,7 +71,11 @@ class G1ArmSDKConfig:
             "max_state_age_s",
             "command_timeout_s",
             "period_s",
-            "blend_s",
+            "release_blend_s",
+            "release_timeout_s",
+            "release_tolerance",
+            "release_velocity",
+            "guard_hard_multiplier",
             "max_velocity",
             "max_acceleration",
             "max_displacement",
@@ -80,6 +89,14 @@ class G1ArmSDKConfig:
                 raise ValueError(f"{name} must be positive and finite")
         if self.period_s > min(self.command_timeout_s, self.max_state_age_s) / 2:
             raise ValueError("Control period must be at most half the freshness bounds")
+        if (
+            isinstance(self.guard_confirm_samples, bool)
+            or not isinstance(self.guard_confirm_samples, int)
+            or self.guard_confirm_samples < 1
+        ):
+            raise ValueError("guard_confirm_samples must be a positive integer")
+        if self.guard_hard_multiplier <= 1:
+            raise ValueError("guard_hard_multiplier must exceed 1")
         for name in ("kp", "kd", "lower", "upper", "torque_limits"):
             values = getattr(self, name)
             if (values or not self.read_only) and (len(values) != 14 or not np.isfinite(values).all()):
@@ -176,19 +193,29 @@ class G1ArmSDK:
         self.weight = 0.0
         self.gravity = None
         self.release_sent = False
+        self.release_complete = False
+        self.normal_release = False
+        self.last_tau = np.zeros(14)
+        self.release_context = None
+        self.guard_counts = {}
         self.lease = None
         self.recent_states = deque(maxlen=64)
         self.fault_context = None
 
     def _receive(self, msg):
         with self.lock:
-            if self.stop.is_set():
+            if self.stop.is_set() and not self.normal_release:
                 return
             try:
                 values = np.array([(m.q, m.dq, m.tau_est) for m in msg.motor_state[:29]])
                 if values.shape != (29, 3) or not np.isfinite(values).all():
                     raise ValueError("Invalid body state")
-                if not np.isfinite(msg.imu_state.rpy).all():
+                if (
+                    not np.isfinite(msg.imu_state.rpy).all()
+                    or len(msg.imu_state.quaternion) != 4
+                    or not np.isfinite(msg.imu_state.quaternion).all()
+                    or np.linalg.norm(msg.imu_state.quaternion) < 1e-8
+                ):
                     raise ValueError("Invalid IMU state")
                 mode = (int(msg.mode_machine), int(msg.mode_pr))
                 if self.mode is not None and mode != self.mode:
@@ -306,6 +333,12 @@ class G1ArmSDK:
                 self._check_state(state)
                 self.last_command = self.clock()
                 self.last_step = self.clock()
+                self.weight = 0.0
+                self.normal_release = False
+                self.release_complete = False
+                self.last_tau = np.zeros(14)
+                self.release_context = None
+                self.guard_counts = {}
                 self.active = True
                 self.thread = threading.Thread(target=self._run, name="g1-arm-sdk-watchdog", daemon=True)
                 self.thread.start()
@@ -323,14 +356,56 @@ class G1ArmSDK:
         if np.any(q < self.config.lower) or np.any(q > self.config.upper):
             raise ValueError("Arm target exceeds configured bounds")
 
+    def _guard(self, reason, value, limit, state, context):
+        """Confirm near-threshold feedback violations on distinct robot ticks.
+
+        A hard excursion still faults immediately. This prevents a single noisy
+        feedback sample from masquerading as sustained motion while preserving
+        the triggering sample and its recent-state neighborhood.
+        """
+        # Keep confirmation independent per joint. Alternating one-sample
+        # excursions on different joints must not combine into a false trip.
+        key = (reason, context.get("joint_index"))
+        entry = self.guard_counts.setdefault(key, {"count": 0, "tick": None, "samples": []})
+        if value <= limit:
+            entry.update(count=0, tick=int(state.tick), samples=[])
+            return
+        if entry["tick"] != int(state.tick):
+            entry.update(count=entry["count"] + 1, tick=int(state.tick))
+            entry["samples"].append({"tick": int(state.tick), "value": float(value)})
+            entry["samples"] = entry["samples"][-self.config.guard_confirm_samples :]
+        hard = value >= limit * self.config.guard_hard_multiplier
+        if not hard and entry["count"] < self.config.guard_confirm_samples:
+            return
+        self.fault_context = {
+            "reason": reason,
+            "value": float(value),
+            "limit": float(limit),
+            "hard_limit": float(limit * self.config.guard_hard_multiplier),
+            "hard_violation": bool(hard),
+            "confirmed_samples": int(entry["count"]),
+            "required_samples": int(self.config.guard_confirm_samples),
+            "confirming_samples": list(entry["samples"]),
+            "tick": int(state.tick),
+            "mode": [int(state.mode_machine), int(state.mode_pr)],
+            "authority_weight": float(self.weight),
+            "state_age_s": float(self.clock() - self.state_at),
+            "recent_states": list(self.recent_states),
+            **context,
+        }
+        raise RuntimeError(f"{reason} exceeded: {value:.6f} versus {limit:.6f}")
+
     def _check_state(self, state):
         q = self._q(state)
         self._check_pose(q)
         displacement = q - self.initial
-        if np.max(np.abs(displacement)) > self.config.max_displacement:
-            index = int(np.argmax(np.abs(displacement)))
-            self.fault_context = {
-                "reason": "measured_displacement_limit",
+        index = int(np.argmax(np.abs(displacement)))
+        self._guard(
+            "measured_displacement_limit",
+            float(abs(displacement[index])),
+            self.config.max_displacement,
+            state,
+            {
                 "joint": ARM_KEYS[index],
                 "joint_index": index,
                 "measured_rad": float(q[index]),
@@ -340,25 +415,34 @@ class G1ArmSDK:
                 "limit_rad": float(self.config.max_displacement),
                 "measured_velocity_rad_s": float(state.motor_state[ARM_SLOTS[index]].dq),
                 "measured_torque_nm": float(state.motor_state[ARM_SLOTS[index]].tau_est),
-                "tick": int(state.tick),
-                "mode": [int(state.mode_machine), int(state.mode_pr)],
-                "authority_weight": float(self.weight),
-                "state_age_s": float(self.clock() - self.state_at),
-                "recent_states": list(self.recent_states),
-            }
-            raise RuntimeError(
-                f"Measured displacement limit exceeded at {ARM_KEYS[index]}: "
-                f"{displacement[index]:+.6f} rad versus {self.config.max_displacement:.6f} rad"
-            )
-        if max(abs(state.motor_state[s].dq) for s in ARM_SLOTS) > self.config.max_measured_velocity:
-            raise RuntimeError("Measured arm velocity limit exceeded")
-        if np.max(np.abs(q - self.previous)) > self.config.max_tracking_error:
-            raise RuntimeError("Tracking error limit exceeded")
-        if self.gravity is not None and (
-            max(abs(v) for v in state.imu_state.rpy[:2]) > self.config.max_tilt_rad
-            or max(abs(state.motor_state[s].q) for s in (12, 13, 14)) > self.config.max_tilt_rad
-        ):
-            raise RuntimeError("Reduced gravity model requires upright torso and near-neutral waist")
+            },
+        )
+        measured_velocity = np.array([state.motor_state[s].dq for s in ARM_SLOTS])
+        index = int(np.argmax(np.abs(measured_velocity)))
+        self._guard(
+            "measured_velocity_limit",
+            float(abs(measured_velocity[index])),
+            self.config.max_measured_velocity,
+            state,
+            {"joint": ARM_KEYS[index], "joint_index": index, "measured_velocity_rad_s": float(measured_velocity[index])},
+        )
+        tracking = q - self.previous
+        index = int(np.argmax(np.abs(tracking)))
+        self._guard(
+            "tracking_error_limit",
+            float(abs(tracking[index])),
+            self.config.max_tracking_error,
+            state,
+            {
+                "joint": ARM_KEYS[index],
+                "joint_index": index,
+                "tracking_error_rad": float(tracking[index]),
+                "measured_rad": float(q[index]),
+                "previous_command_rad": float(self.previous[index]),
+            },
+        )
+        if self.gravity is not None and max(abs(v) for v in state.imu_state.rpy[:2]) > self.config.max_tilt_rad:
+            raise RuntimeError("Pelvis tilt exceeds the reviewed live-gravity envelope")
         return q
 
     def send(self, action):
@@ -405,19 +489,125 @@ class G1ArmSDK:
             self._check_pose(command)
             if np.max(np.abs(command - self.initial)) > self.config.max_displacement:
                 raise RuntimeError("Slew-limited displacement limit exceeded")
-            tau = np.zeros(14) if self.gravity is None else self.gravity.gravity(q)
+            tau = (
+                np.zeros(14)
+                if self.gravity is None
+                else self.gravity.gravity_live(
+                    q,
+                    [state.motor_state[s].q for s in (12, 13, 14)],
+                    state.imu_state.quaternion,
+                )
+            )
             if not np.isfinite(tau).all() or np.max(np.abs(tau)) > self.config.max_feedforward:
                 raise RuntimeError("Invalid or excessive gravity feedforward")
             dq = np.array([state.motor_state[s].dq for s in ARM_SLOTS])
             estimated = np.asarray(self.config.kp) * (command - q) - np.asarray(self.config.kd) * dq + tau
-            if np.any(np.abs(estimated) > self.config.torque_limits) or any(
-                abs(state.motor_state[s].tau_est) > self.config.torque_limits[i]
-                for i, s in enumerate(ARM_SLOTS)
-            ):
+            if np.any(np.abs(estimated) > self.config.torque_limits):
                 raise RuntimeError("Estimated arm torque limit exceeded")
-            self.weight = min(1.0, self.weight + dt / self.config.blend_s)
+            measured_torque = np.array([state.motor_state[s].tau_est for s in ARM_SLOTS])
+            ratios = np.abs(measured_torque) / np.asarray(self.config.torque_limits)
+            index = int(np.argmax(ratios))
+            self._guard(
+                "measured_torque_limit",
+                float(abs(measured_torque[index])),
+                self.config.torque_limits[index],
+                state,
+                {
+                    "joint": ARM_KEYS[index],
+                    "joint_index": index,
+                    "measured_torque_nm": float(measured_torque[index]),
+                    "estimated_command_torque_nm": float(estimated[index]),
+                },
+            )
+            # Unitree's arm_sdk motion-mode acquisition uses full arm weight and
+            # obtains continuity from a measured-pose target plus bounded target
+            # updates. Weight ramping is reserved for normal release to stock.
+            self.weight = 1.0
             self.transport.write(arm_command(command, tau, self.weight, state.mode_machine, self.config))
-            self.previous, self.velocity, self.last_step = command, velocity, now
+            self.previous, self.velocity, self.last_tau, self.last_step = command, velocity, tau, now
+
+    def release_to_initial(self):
+        """Return to the acquisition pose, then request a gradual handback to stock control."""
+        with self.lock:
+            if not self.active or self.fault or self.thread is None:
+                raise RuntimeError(self.fault or "Arm authority is not active")
+            initial_action = dict(zip(ARM_KEYS, self.initial.tolist(), strict=True))
+
+        started = time.monotonic()
+        deadline = started + self.config.release_timeout_s
+        settled = 0
+        samples = 0
+        maximum_error = 0.0
+        while time.monotonic() < deadline:
+            self.send(initial_action)
+            with self.lock:
+                state = self._snapshot()
+                q = self._check_state(state)
+                dq = np.array([state.motor_state[s].dq for s in ARM_SLOTS])
+                arrived = np.max(np.abs(q - self.initial)) <= self.config.release_tolerance
+                stopped = np.max(np.abs(dq)) <= self.config.release_velocity
+                error = float(np.max(np.abs(q - self.initial)))
+                speed = float(np.max(np.abs(dq)))
+                maximum_error = max(maximum_error, error)
+                samples += 1
+                self.release_context = {
+                    "return_samples": samples,
+                    "maximum_return_error_rad": maximum_error,
+                    "final_return_error_rad": error,
+                    "final_return_velocity_rad_s": speed,
+                    "return_duration_s": time.monotonic() - started,
+                    "fade_duration_s": self.config.release_blend_s,
+                    "complete": False,
+                }
+            settled = settled + 1 if arrived and stopped else 0
+            if settled >= 3:
+                with self.lock:
+                    self.normal_release = True
+                self.stop.set()
+                break
+            time.sleep(self.config.period_s)
+        else:
+            with self.lock:
+                self.fault = "Timed out returning to the acquisition pose before release"
+            raise RuntimeError(self.fault)
+
+        self.thread.join(timeout=self.config.release_blend_s * 3.0 + 2.0)
+        if self.thread.is_alive():
+            raise RuntimeError("Arm publisher did not finish normal release")
+        if self.fault:
+            raise RuntimeError(self.fault)
+        if not self.release_complete:
+            raise RuntimeError("Normal arm release did not complete")
+        with self.lock:
+            self.release_context["complete"] = True
+
+    def _write_immediate_release(self):
+        for _ in range(3):
+            self.transport.write(arm_command(self.previous, np.zeros(14), 0.0, self.mode[0], self.config))
+            time.sleep(self.config.period_s)
+        self.release_sent = True
+
+    def _write_gradual_release(self):
+        steps = max(2, math.ceil(self.config.release_blend_s / self.config.period_s) + 1)
+        for weight in np.linspace(1.0, 0.0, steps):
+            with self.lock:
+                state = self._snapshot()
+                q = self._check_state(state)
+                tau = (
+                    self.last_tau
+                    if self.gravity is None
+                    else self.gravity.gravity_live(
+                        q,
+                        [state.motor_state[s].q for s in (12, 13, 14)],
+                        state.imu_state.quaternion,
+                    )
+                )
+                self.weight = float(weight)
+                command = arm_command(self.previous, tau, self.weight, state.mode_machine, self.config)
+            self.transport.write(command)
+            time.sleep(self.config.period_s)
+        self.release_sent = True
+        self.release_complete = True
 
     def _run(self):
         try:
@@ -430,15 +620,20 @@ class G1ArmSDK:
             with self.lock:
                 self.active = False
                 self.stop.set()
-                # Explicitly selected release-to-stock contract, not a verified physical stop.
+            # A clean caller-requested release returns to the acquisition pose
+            # before fading authority. Faults and interrupts retain the bounded
+            # immediate weight-zero fallback; neither path is a physical stop.
+            try:
+                if self.normal_release and not self.fault:
+                    self._write_gradual_release()
+                else:
+                    self._write_immediate_release()
+            except Exception as exc:
                 try:
-                    for _ in range(3):
-                        self.transport.write(
-                            arm_command(self.previous, np.zeros(14), 0.0, self.mode[0], self.config)
-                        )
-                        time.sleep(self.config.period_s)
-                    self.release_sent = True
-                except Exception as exc:
+                    self._write_immediate_release()
+                except Exception as fallback_exc:
+                    exc = ExceptionGroup("Normal and fallback arm release failed", [exc, fallback_exc])
+                with self.lock:
                     self.fault = f"{self.fault or 'Shutdown'}; release write failed: {exc}"
 
     def close(self):

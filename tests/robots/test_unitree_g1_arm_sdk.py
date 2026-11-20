@@ -41,7 +41,7 @@ def state(tick=1):
         mode_pr=0,
         mode_machine=5,
         motor_state=[SimpleNamespace(q=0.0, dq=0.0, tau_est=0.0) for _ in range(35)],
-        imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0]),
+        imu_state=SimpleNamespace(rpy=[0.0, 0.0, 0.0], quaternion=[1.0, 0.0, 0.0, 0.0]),
     )
 
 
@@ -171,7 +171,7 @@ def test_invalid_command_latches_fault(backend, bad):
         robot.send(dict.fromkeys(ARM_KEYS, 0.0))
 
 
-def test_slew_limits_both_derivatives_and_initial_blend(backend):
+def test_slew_limits_both_derivatives_with_full_startup_weight(backend):
     robot, io, now = backend
     positions = [np.zeros(14)]
     for step in range(1, 150):
@@ -185,8 +185,32 @@ def test_slew_limits_both_derivatives_and_initial_blend(backend):
     velocity = np.diff(positions, axis=0) / 0.02
     assert np.max(np.abs(velocity)) <= 0.1 + 1e-8
     assert np.max(np.abs(np.diff(velocity, axis=0) / 0.02)) <= 0.5 + 1e-8
-    assert io.commands[0].motor_cmd[29].q == pytest.approx(0.01)
+    assert io.commands[0].motor_cmd[29].q == 1.0
     assert io.commands[-1].motor_cmd[29].q == 1.0
+
+
+def test_normal_release_returns_to_initial_then_fades_weight(backend):
+    robot, io, now = backend
+    robot.config.release_blend_s = 0.04
+    robot.thread = SimpleNamespace(
+        join=lambda timeout: robot._write_gradual_release(),
+        is_alive=lambda: False,
+    )
+    robot.previous[0] = 0.04
+    robot.weight = 1.0
+
+    def send(action):
+        robot.previous = np.array([action[key] for key in ARM_KEYS])
+        robot.last_command = now[0]
+
+    robot.send = send
+    robot.release_to_initial()
+
+    weights = [command.motor_cmd[29].q for command in io.commands]
+    assert weights[0] == 1.0
+    assert weights[-1] == 0.0
+    assert all(a >= b for a, b in zip(weights, weights[1:], strict=False))
+    assert robot.release_complete and robot.release_sent
 
 
 def test_watchdog_releases_even_when_caller_disappears():
@@ -219,6 +243,40 @@ def test_measured_envelope_faults(backend, field, value):
         assert robot.fault_context["authority_weight"] == 0
         assert robot.fault_context["tick"] == 2
         assert robot.fault_context["recent_states"][-1]["q"][0] == pytest.approx(value)
+
+
+def test_single_near_threshold_feedback_sample_does_not_trip_guard(backend):
+    robot, _, now = backend
+    msg = state(2)
+    msg.motor_state[15].q = 0.06
+    now[0] += robot.config.period_s
+    robot._receive(msg)
+
+    robot._check_state(robot._snapshot())
+    robot._check_state(robot._snapshot())  # Same robot tick cannot confirm twice.
+
+    assert robot.fault_context is None
+    assert robot.guard_counts[("measured_displacement_limit", 0)]["count"] == 1
+
+
+def test_three_distinct_near_threshold_samples_trip_with_context(backend):
+    robot, _, now = backend
+    for tick in (2, 3):
+        msg = state(tick)
+        msg.motor_state[15].q = 0.06
+        now[0] += robot.config.period_s
+        robot._receive(msg)
+        robot._check_state(robot._snapshot())
+    msg = state(4)
+    msg.motor_state[15].q = 0.06
+    now[0] += robot.config.period_s
+    robot._receive(msg)
+    with pytest.raises(RuntimeError, match="measured_displacement_limit"):
+        robot._check_state(robot._snapshot())
+
+    assert robot.fault_context["confirmed_samples"] == 3
+    assert robot.fault_context["hard_violation"] is False
+    assert [sample["tick"] for sample in robot.fault_context["recent_states"][-3:]] == [2, 3, 4]
 
 
 def test_robot_facade_does_not_touch_legacy_backend():

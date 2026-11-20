@@ -76,7 +76,7 @@ def test_initial_hold_can_test_unverified_waist_and_failure_behavior(assets):
         "robot_side_execution_confirmed",
         "exclusive_arm_publisher_confirmed",
         "stock_lower_body_owner_confirmed",
-        "release_weight_zero_behavior_reviewed",
+        "normal_return_and_release_reviewed",
         "gains_limits_and_gravity_reviewed",
         "initial_hold_uncommanded_waist_test_approved",
         "initial_hold_failure_response_limitations_accepted",
@@ -95,6 +95,12 @@ def test_initial_hold_can_test_unverified_waist_and_failure_behavior(assets):
     validate_contract(contract, assets, hardware_motion=True, phase="hold")
     with pytest.raises(ValueError, match="uncommanded_waist_semantics_verified"):
         validate_contract(contract, assets, hardware_motion=True, phase="joint")
+
+    contract["uncommanded_waist_semantics_verified"] = True
+    with pytest.raises(ValueError, match="explicit acceptance"):
+        validate_contract(contract, assets, hardware_motion=True, phase="joint")
+    contract["packet_loss_and_process_death_limitations_accepted"] = True
+    validate_contract(contract, assets, hardware_motion=True, phase="joint")
 
 
 @pytest.mark.parametrize(
