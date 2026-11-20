@@ -410,6 +410,7 @@ def main(argv=None):
                     report["errors"].append(f"Cleanup: {exc}")
                 report["release_packet_sent"] = robot.release_sent
                 report["physical_stop_verified"] = False
+                report["fault_context"] = robot.fault_context
             out.seek(0)
             json.dump(report, out, indent=2)
             out.truncate()

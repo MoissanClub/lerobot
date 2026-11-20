@@ -12,6 +12,7 @@ import math
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -176,6 +177,8 @@ class G1ArmSDK:
         self.gravity = None
         self.release_sent = False
         self.lease = None
+        self.recent_states = deque(maxlen=64)
+        self.fault_context = None
 
     def _receive(self, msg):
         with self.lock:
@@ -199,7 +202,18 @@ class G1ArmSDK:
                         raise ValueError("Robot tick regressed")
                 if self.state_at is not None and self.clock() - self.state_at > self.config.max_state_age_s:
                     raise ValueError("Feedback receive gap exceeded")
-                self.state, self.state_at, self.tick, self.mode = copy.deepcopy(msg), self.clock(), tick, mode
+                received_at = self.clock()
+                self.state, self.state_at, self.tick, self.mode = copy.deepcopy(msg), received_at, tick, mode
+                self.recent_states.append(
+                    {
+                        "tick": tick,
+                        "received_at": received_at,
+                        "mode": list(mode),
+                        "q": [float(msg.motor_state[s].q) for s in ARM_SLOTS],
+                        "dq": [float(msg.motor_state[s].dq) for s in ARM_SLOTS],
+                        "tau_est": [float(msg.motor_state[s].tau_est) for s in ARM_SLOTS],
+                    }
+                )
             except Exception as exc:
                 self.fault = str(exc)
 
@@ -312,8 +326,30 @@ class G1ArmSDK:
     def _check_state(self, state):
         q = self._q(state)
         self._check_pose(q)
-        if np.max(np.abs(q - self.initial)) > self.config.max_displacement:
-            raise RuntimeError("Measured displacement limit exceeded")
+        displacement = q - self.initial
+        if np.max(np.abs(displacement)) > self.config.max_displacement:
+            index = int(np.argmax(np.abs(displacement)))
+            self.fault_context = {
+                "reason": "measured_displacement_limit",
+                "joint": ARM_KEYS[index],
+                "joint_index": index,
+                "measured_rad": float(q[index]),
+                "initial_rad": float(self.initial[index]),
+                "previous_command_rad": float(self.previous[index]),
+                "displacement_rad": float(displacement[index]),
+                "limit_rad": float(self.config.max_displacement),
+                "measured_velocity_rad_s": float(state.motor_state[ARM_SLOTS[index]].dq),
+                "measured_torque_nm": float(state.motor_state[ARM_SLOTS[index]].tau_est),
+                "tick": int(state.tick),
+                "mode": [int(state.mode_machine), int(state.mode_pr)],
+                "authority_weight": float(self.weight),
+                "state_age_s": float(self.clock() - self.state_at),
+                "recent_states": list(self.recent_states),
+            }
+            raise RuntimeError(
+                f"Measured displacement limit exceeded at {ARM_KEYS[index]}: "
+                f"{displacement[index]:+.6f} rad versus {self.config.max_displacement:.6f} rad"
+            )
         if max(abs(state.motor_state[s].dq) for s in ARM_SLOTS) > self.config.max_measured_velocity:
             raise RuntimeError("Measured arm velocity limit exceeded")
         if np.max(np.abs(q - self.previous)) > self.config.max_tracking_error:

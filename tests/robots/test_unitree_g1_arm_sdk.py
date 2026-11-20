@@ -212,6 +212,13 @@ def test_measured_envelope_faults(backend, field, value):
     robot._receive(msg)
     with pytest.raises(RuntimeError):
         robot._step()
+    if field == "q":
+        assert robot.fault_context["reason"] == "measured_displacement_limit"
+        assert robot.fault_context["joint"] == ARM_KEYS[0]
+        assert robot.fault_context["displacement_rad"] == pytest.approx(value)
+        assert robot.fault_context["authority_weight"] == 0
+        assert robot.fault_context["tick"] == 2
+        assert robot.fault_context["recent_states"][-1]["q"][0] == pytest.approx(value)
 
 
 def test_robot_facade_does_not_touch_legacy_backend():
