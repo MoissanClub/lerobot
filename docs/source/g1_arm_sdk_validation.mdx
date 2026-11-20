@@ -133,6 +133,11 @@ thread watchdog as a robot-side safety mechanism.
 4. Only after review, run a no-displacement authority acquisition. This applies
    torque and can move the robot even though its target starts at measured pose.
    Observe both arms, waist and legs and the actual release to stock control.
+   The hold-specific contract fields may approve this observation while
+   `uncommanded_waist_semantics_verified` and
+   `packet_loss_and_process_death_response_verified` remain false. Joint motion
+   and physical replay continue to require those findings as verified; do not
+   promote them based only on approval to perform the hold.
 
 ```bash
 "$PYTHON" examples/unitree_g1/validate_arm_sdk.py \

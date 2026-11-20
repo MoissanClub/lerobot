@@ -78,6 +78,8 @@ def contract_template(urdf):
         "stock_lower_body_owner_confirmed": False,
         "uncommanded_waist_semantics_verified": False,
         "packet_loss_and_process_death_response_verified": False,
+        "initial_hold_uncommanded_waist_test_approved": False,
+        "initial_hold_failure_response_limitations_accepted": False,
         "release_weight_zero_behavior_reviewed": False,
         "gains_limits_and_gravity_reviewed": False,
         "urdf_sha256": digest(urdf),
@@ -86,7 +88,7 @@ def contract_template(urdf):
     }
 
 
-def validate_contract(doc, urdf, hardware_motion):
+def validate_contract(doc, urdf, hardware_motion, phase=None):
     if doc.get("schema") != 1:
         raise ValueError("Unsupported contract schema")
     cfg = G1ArmSDKConfig(**doc["arm_sdk"])
@@ -108,13 +110,25 @@ def validate_contract(doc, urdf, hardware_motion):
             "robot_side_execution_confirmed",
             "exclusive_arm_publisher_confirmed",
             "stock_lower_body_owner_confirmed",
-            "uncommanded_waist_semantics_verified",
-            "packet_loss_and_process_death_response_verified",
             "release_weight_zero_behavior_reviewed",
             "gains_limits_and_gravity_reviewed",
         ):
             if doc.get(key) is not True:
                 raise ValueError(f"Hardware motion gate not approved: {key}")
+        if phase == "hold":
+            for key in (
+                "initial_hold_uncommanded_waist_test_approved",
+                "initial_hold_failure_response_limitations_accepted",
+            ):
+                if doc.get(key) is not True:
+                    raise ValueError(f"Initial hold gate not approved: {key}")
+        else:
+            for key in (
+                "uncommanded_waist_semantics_verified",
+                "packet_loss_and_process_death_response_verified",
+            ):
+                if doc.get(key) is not True:
+                    raise ValueError(f"Hardware motion gate not approved: {key}")
         for key in (
             "reviewer",
             "robot_serial",
@@ -276,7 +290,7 @@ def main(argv=None):
         try:
             doc = json.loads(args.contract.read_text())
             hardware_motion = args.backend == "hardware" and args.phase != "read-only"
-            cfg = validate_contract(doc, args.urdf, hardware_motion)
+            cfg = validate_contract(doc, args.urdf, hardware_motion, phase=args.phase)
             cfg = replace(cfg, read_only=args.phase == "read-only")
             report["contract_sha256"] = digest(args.contract)
             report["configuration"] = asdict(cfg)

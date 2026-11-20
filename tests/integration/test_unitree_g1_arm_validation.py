@@ -68,6 +68,35 @@ def test_unreviewed_template_cannot_enable_hardware(assets):
         validate_contract(contract, assets, hardware_motion=False)
 
 
+def test_initial_hold_can_test_unverified_waist_and_failure_behavior(assets):
+    contract = contract_template(assets)
+    contract["arm_sdk"]["expected_mode_machine"] = 5
+    for key in (
+        "reviewed",
+        "robot_side_execution_confirmed",
+        "exclusive_arm_publisher_confirmed",
+        "stock_lower_body_owner_confirmed",
+        "release_weight_zero_behavior_reviewed",
+        "gains_limits_and_gravity_reviewed",
+        "initial_hold_uncommanded_waist_test_approved",
+        "initial_hold_failure_response_limitations_accepted",
+    ):
+        contract[key] = True
+    for key in (
+        "reviewer",
+        "robot_serial",
+        "firmware",
+        "mode_and_manufacturer_procedure",
+        "support_and_stop_procedure",
+        "payload_and_tool_model",
+    ):
+        contract[key] = "reviewed"
+
+    validate_contract(contract, assets, hardware_motion=True, phase="hold")
+    with pytest.raises(ValueError, match="uncommanded_waist_semantics_verified"):
+        validate_contract(contract, assets, hardware_motion=True, phase="joint")
+
+
 @pytest.mark.parametrize(
     "phase,joint",
     [("read-only", None), ("hold", None), ("joint", "kLeftElbow.q"), ("joint", "kRightElbow.q")],
